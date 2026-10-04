@@ -1,0 +1,8 @@
+/dirclone
+/bin/
+coverage.out
+*.db
+*.db-shm
+*.db-wal
+*.part
+.DS_Store
