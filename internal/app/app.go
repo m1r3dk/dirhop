@@ -1,0 +1,368 @@
+package app
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"path"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/1jehuang/dirclone/internal/config"
+	"github.com/1jehuang/dirclone/internal/crawler"
+	"github.com/1jehuang/dirclone/internal/database"
+	"github.com/1jehuang/dirclone/internal/downloader"
+	"github.com/1jehuang/dirclone/internal/filesystem"
+	"github.com/1jehuang/dirclone/internal/httpclient"
+	"github.com/1jehuang/dirclone/internal/model"
+	"github.com/1jehuang/dirclone/internal/session"
+)
+
+// App composes the persistent store, HTTP transport, sessions, virtual
+// filesystem, crawler, and downloader used by both CLI interfaces.
+type App struct {
+	Config   config.Config
+	DB       *database.DB
+	Sessions *session.Manager
+	HTTP     *httpclient.Client
+}
+
+func Open(cfg config.Config) (*App, error) {
+	if err := cfg.Paths.EnsureDirs(); err != nil {
+		return nil, err
+	}
+	db, err := database.OpenWithTimeout(cfg.Paths.Database, cfg.BusyTimeout)
+	if err != nil {
+		return nil, err
+	}
+	http := httpclient.New(httpclient.Config{
+		Timeout:             cfg.HTTPTimeout,
+		Retries:             cfg.Retries,
+		MaxIdleConnsPerHost: max(16, cfg.CrawlConcurrency+cfg.DownloadWorkers),
+		MaxConnsPerHost:     max(24, cfg.CrawlConcurrency+cfg.DownloadWorkers),
+	})
+	return &App{Config: cfg, DB: db, Sessions: session.New(db), HTTP: http}, nil
+}
+
+func (a *App) Close() error {
+	if a.HTTP != nil {
+		a.HTTP.CloseIdleConnections()
+	}
+	if a.DB != nil {
+		return a.DB.Close()
+	}
+	return nil
+}
+
+func (a *App) Site(ctx context.Context, selector string) (*model.Site, error) {
+	site, err := a.Sessions.Resolve(ctx, selector)
+	if errors.Is(err, session.ErrNoActive) {
+		return nil, ErrNoSession
+	}
+	return site, err
+}
+
+func (a *App) FS(site *model.Site) *filesystem.FS { return filesystem.New(a.DB, site.ID) }
+
+// OpenURL reuses a canonical URL session or creates and crawls a new one.
+func (a *App) OpenURL(ctx context.Context, rawURL, name string, activate bool) (*model.Site, bool, error) {
+	site, created, err := a.Sessions.Open(ctx, rawURL, name, activate)
+	if err != nil {
+		return nil, false, err
+	}
+	if created {
+		if err := a.Crawl(ctx, site, true); err != nil {
+			return site, true, err
+		}
+		site, err = a.DB.SiteByID(ctx, site.ID)
+	}
+	return site, created, err
+}
+
+// Crawl refreshes one site's linked directory hierarchy. Reconciliation only
+// removes unseen entries after a fully successful run.
+func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
+	base, err := url.Parse(site.CanonicalURL)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNetwork, err)
+	}
+	mode := model.CrawlModeIncremental
+	if full || site.LastCrawledAt == nil {
+		mode = model.CrawlModeFull
+	}
+	run := &model.CrawlRun{SiteID: site.ID, Mode: mode, Status: model.ScanStatusRunning, StartedAt: time.Now().UTC()}
+	if err := a.DB.StartCrawlRun(ctx, run); err != nil {
+		return err
+	}
+	repo := &crawlRepository{db: a.DB, site: site, base: base, run: run, seenAt: run.StartedAt, conditional: mode == model.CrawlModeIncremental}
+	workerCount := site.CrawlConcurrency
+	if workerCount <= 0 {
+		workerCount = a.Config.CrawlConcurrency
+	}
+	engine, err := crawler.New(a.HTTP, repo, crawler.Config{
+		BaseURL: base, Workers: workerCount, MaxDepth: 1024, MaxDirectories: 10_000_000,
+		UserAgent: a.Config.UserAgent,
+	})
+	if err == nil {
+		err = engine.Crawl(ctx)
+	}
+
+	repo.mu.Lock()
+	run.Directories = repo.directories
+	run.Files = repo.files
+	run.Bytes = repo.bytes
+	run.ErrorCount = repo.errors
+	rootFailed := repo.rootFailed
+	rootUnsupported := repo.rootUnsupported
+	repo.mu.Unlock()
+
+	switch {
+	case errors.Is(err, context.Canceled):
+		run.Status = model.ScanStatusCancelled
+		run.FailureReason = err.Error()
+	case err != nil || rootFailed:
+		run.Status = model.ScanStatusFailed
+		if err != nil {
+			run.FailureReason = err.Error()
+		} else {
+			run.FailureReason = "root directory could not be indexed"
+		}
+	default:
+		run.Status = model.ScanStatusComplete
+	}
+	finishErr := a.DB.FinishCrawlRun(context.WithoutCancel(ctx), run)
+	if finishErr != nil {
+		return finishErr
+	}
+	if run.Status == model.ScanStatusComplete && run.ErrorCount == 0 {
+		if err := a.DB.MarkEntriesRemovedBefore(context.WithoutCancel(ctx), site.ID, run.StartedAt); err != nil {
+			return err
+		}
+	}
+	if rootUnsupported {
+		return fmt.Errorf("%w: %s", ErrUnsupportedListing, run.FailureReason)
+	}
+	if run.Status == model.ScanStatusFailed {
+		return fmt.Errorf("%w: %s", ErrNetwork, run.FailureReason)
+	}
+	return err
+}
+
+func (a *App) Download(ctx context.Context, site *model.Site, paths []string, destination string, opts downloader.Options) (downloader.Result, error) {
+	source := &downloadSource{fs: a.FS(site)}
+	d := &downloader.Downloader{Source: source, Client: a.HTTP.HTTPClient()}
+	result, err := d.Download(ctx, paths, destination, opts)
+	if err != nil {
+		return result, fmt.Errorf("%w: %v", ErrDownload, err)
+	}
+	return result, nil
+}
+
+type downloadSource struct{ fs *filesystem.FS }
+
+func (s *downloadSource) Expand(ctx context.Context, paths []string) ([]downloader.Entry, error) {
+	var out []downloader.Entry
+	seen := map[string]struct{}{}
+	for _, requested := range paths {
+		root, err := s.fs.Resolve(ctx, requested)
+		if err != nil {
+			return nil, err
+		}
+		entries, err := s.fs.FilesUnder(ctx, requested)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if _, ok := seen[entry.NormalizedPath]; ok {
+				continue
+			}
+			seen[entry.NormalizedPath] = struct{}{}
+			base := root.NormalizedPath
+			if root.IsDir() && base != "/" {
+				base = path.Dir(base) // keep "software/" in downloads/software/...
+			}
+			rel, err := filesystem.RelativeDownloadPath(base, entry)
+			if err != nil {
+				return nil, err
+			}
+			size := int64(-1)
+			if entry.Size != nil {
+				size = *entry.Size
+			}
+			out = append(out, downloader.Entry{Path: rel, URL: entry.URL, Size: size})
+		}
+	}
+	return out, nil
+}
+
+type crawlRepository struct {
+	db     *database.DB
+	site   *model.Site
+	base   *url.URL
+	run    *model.CrawlRun
+	seenAt time.Time
+
+	mu              sync.Mutex
+	directories     int64
+	files           int64
+	bytes           int64
+	errors          int64
+	rootFailed      bool
+	rootUnsupported bool
+	conditional     bool
+}
+
+func (r *crawlRepository) RequestHeaders(ctx context.Context, raw string) http.Header {
+	if !r.conditional {
+		return nil
+	}
+	virtual, err := virtualPath(r.base, raw)
+	if err != nil {
+		return nil
+	}
+	entry, err := r.db.EntryByPath(ctx, r.site.ID, virtual, false)
+	if err != nil {
+		return nil
+	}
+	headers := make(http.Header)
+	if entry.ETag != "" {
+		headers.Set("If-None-Match", entry.ETag)
+	}
+	if entry.LastModified != "" {
+		headers.Set("If-Modified-Since", entry.LastModified)
+	}
+	return headers
+}
+
+func (r *crawlRepository) CachedDirectories(ctx context.Context, raw string) ([]string, error) {
+	virtual, err := virtualPath(r.base, raw)
+	if err != nil {
+		return nil, err
+	}
+	parent, err := r.db.EntryByPath(ctx, r.site.ID, virtual, false)
+	if err != nil {
+		return nil, err
+	}
+	children, err := r.db.Children(ctx, r.site.ID, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	var urls []string
+	for _, child := range children {
+		if child.IsDir() {
+			urls = append(urls, child.URL)
+		}
+	}
+	return urls, nil
+}
+
+func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.DirectoryOutcome) error {
+	dirPath, err := virtualPath(r.base, outcome.URL)
+	if err != nil {
+		return r.recordError(ctx, outcome, err)
+	}
+	parent, err := r.db.EntryByPath(ctx, r.site.ID, dirPath, false)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r.recordError(ctx, outcome, fmt.Errorf("directory missing from index: %s", dirPath))
+	}
+	if err != nil {
+		return err
+	}
+
+	if outcome.Error != "" {
+		if dirPath == "/" {
+			r.mu.Lock()
+			r.rootFailed = true
+			r.rootUnsupported = strings.Contains(outcome.Error, "unsupported directory listing")
+			r.mu.Unlock()
+		}
+		return r.recordError(ctx, outcome, errors.New(outcome.Error))
+	}
+	if outcome.StatusCode == http.StatusNotModified {
+		if err := r.db.TouchDirectFiles(ctx, r.site.ID, parent.ID, r.seenAt); err != nil {
+			return err
+		}
+	}
+
+	if outcome.Parser != "" && r.site.ParserType == "" {
+		if err := r.db.SetSiteParser(ctx, r.site.ID, outcome.Parser); err != nil {
+			return err
+		}
+		r.site.ParserType = outcome.Parser
+	}
+	parent.ETag = outcome.ETag
+	parent.LastModified = outcome.LastModified
+	parent.LastSeenAt = r.seenAt
+	parent.UpdatedAt = time.Now().UTC()
+	if _, err := r.db.UpsertEntries(ctx, []model.Entry{*parent}); err != nil {
+		return err
+	}
+
+	batch := make([]model.Entry, 0, len(outcome.Entries))
+	for _, parsed := range outcome.Entries {
+		if parsed.URL == nil {
+			continue
+		}
+		normalized, err := virtualPath(r.base, parsed.URL.String())
+		if err != nil || normalized == "/" {
+			continue
+		}
+		entryType := model.EntryTypeFile
+		if parsed.IsDir {
+			entryType = model.EntryTypeDirectory
+		}
+		entry := model.Entry{
+			SiteID: r.site.ID, ParentID: &parent.ID, Name: parsed.Name,
+			NormalizedPath: normalized, URL: parsed.URL.String(), Type: entryType,
+			Size: parsed.Size, ModifiedAt: parsed.Modified, LastSeenAt: r.seenAt,
+		}
+		batch = append(batch, entry)
+	}
+	if _, err := r.db.UpsertEntries(ctx, batch); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	r.directories++
+	for _, entry := range batch {
+		if entry.Type == model.EntryTypeFile {
+			r.files++
+			if entry.Size != nil {
+				r.bytes += *entry.Size
+			}
+		}
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *crawlRepository) recordError(ctx context.Context, outcome crawler.DirectoryOutcome, cause error) error {
+	r.mu.Lock()
+	r.errors++
+	r.mu.Unlock()
+	return r.db.AddCrawlError(ctx, &model.CrawlError{
+		RunID: r.run.ID, SiteID: r.site.ID, URL: outcome.URL,
+		Path: outcome.URL, Operation: "crawl", Message: cause.Error(),
+	})
+}
+
+func virtualPath(base *url.URL, raw string) (string, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	basePath := path.Clean("/" + base.Path)
+	targetPath := path.Clean("/" + target.Path)
+	if targetPath == basePath {
+		return "/", nil
+	}
+	prefix := strings.TrimSuffix(basePath, "/") + "/"
+	if !strings.HasPrefix(targetPath, prefix) {
+		return "", fmt.Errorf("URL outside session root: %s", raw)
+	}
+	return path.Clean("/" + strings.TrimPrefix(targetPath, prefix)), nil
+}

@@ -1,9 +1,10 @@
-# dirclone configuration
-workers = 8
+# dirclone configuration (TOML-style key/value subset)
+crawl_concurrency = 8
 download_workers = 4
-timeout = "30s"
+http_timeout = "30s"
+busy_timeout = "5s"
 retries = 3
-metadata = "normal"
 download_directory = "downloads"
+metadata = "normal"
 color = true
-user_agent = "dirclone/1.0"
+user_agent = "dirclone/1"

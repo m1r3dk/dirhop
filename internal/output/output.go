@@ -30,6 +30,14 @@ func Size(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/math.Pow(float64(unit), float64(exp)), prefix)
 }
 
+// Raw formats an exact byte count, or "-" when unknown.
+func Raw(n int64) string {
+	if n < 0 {
+		return "-"
+	}
+	return fmt.Sprint(n)
+}
+
 func RelativeTime(t time.Time) string {
 	if t.IsZero() {
 		return "never"
