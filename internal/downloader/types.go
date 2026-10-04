@@ -18,6 +18,8 @@ type Entry struct {
 	URL  string
 	// Size is the expected byte size. A negative value means unknown.
 	Size int64
+	// ID is an opaque caller identifier (e.g. index entry ID) echoed in events.
+	ID int64
 }
 
 // EntrySource lets filesystem or database packages expand files and recursive

@@ -7,32 +7,35 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"sort"
 	"strings"
-	"text/tabwriter"
-	"time"
 
 	"golang.org/x/term"
 
 	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/downloader"
 	"github.com/m1r3dk/dirclone/internal/model"
-	"github.com/m1r3dk/dirclone/internal/output"
 )
 
+// Exec runs one command line (already split) against a session using the same
+// implementation as the one-shot CLI.
+type Exec func(ctx context.Context, out io.Writer, session string, args []string) error
+
 var commands = []string{"ls", "cd", "pwd", "tree", "stat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "clear", "help", "exit", "quit"}
+
+// Commands whose first argument is a remote path, for completion.
+var pathCommands = map[string]bool{"ls": true, "cd": true, "tree": true, "stat": true, "du": true, "download": true, "urls": true}
 
 type state struct {
 	app  *app.App
 	site *model.Site
 	out  io.Writer
+	exec Exec
 }
 
-// Run starts an interactive remote-filesystem shell. All filesystem operations
-// use the same SQLite-backed FS as one-shot commands.
-func Run(ctx context.Context, application *app.App, site *model.Site, in io.Reader, out io.Writer) error {
-	s := &state{app: application, site: site, out: out}
+// Run starts the interactive shell. Shell-native commands (session switching,
+// help, clear, exit) are handled here; everything else goes through exec.
+func Run(ctx context.Context, application *app.App, site *model.Site, in io.Reader, out io.Writer, exec Exec) error {
+	s := &state{app: application, site: site, out: out, exec: exec}
 	if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
 		return s.runTerminal(ctx, file, out)
 	}
@@ -57,12 +60,17 @@ func (s *state) runTerminal(ctx context.Context, input *os.File, out io.Writer) 
 	if w, h, e := term.GetSize(int(input.Fd())); e == nil {
 		_ = t.SetSize(w, h)
 	}
+	history := loadHistory(s.app.Config.Paths.History)
+	t.History = history
+	defer history.save()
 	t.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
 		if key != '\t' {
 			return "", 0, false
 		}
 		return s.complete(ctx, line, pos)
 	}
+	// Command output must go through the terminal so raw mode gets \r\n.
+	s.out = t
 	for {
 		t.SetPrompt(s.prompt())
 		line, err := t.ReadLine()
@@ -73,11 +81,7 @@ func (s *state) runTerminal(ctx context.Context, input *os.File, out io.Writer) 
 		if err != nil && !errors.Is(err, term.ErrPasteIndicator) {
 			return err
 		}
-		stop, runErr := s.execute(ctx, line)
-		if runErr != nil {
-			fmt.Fprintf(out, "error: %v\n", runErr)
-		}
-		if stop {
+		if s.handle(ctx, line) {
 			return nil
 		}
 	}
@@ -88,174 +92,43 @@ func (s *state) runScanner(ctx context.Context, in io.Reader) error {
 	for {
 		fmt.Fprint(s.out, s.prompt())
 		if !scanner.Scan() {
+			fmt.Fprintln(s.out)
 			return scanner.Err()
 		}
-		stop, err := s.execute(ctx, scanner.Text())
-		if err != nil {
-			fmt.Fprintf(s.out, "error: %v\n", err)
-		}
-		if stop {
+		if s.handle(ctx, scanner.Text()) {
 			return nil
 		}
 	}
 }
 
+// handle executes one line and reports whether the shell should exit.
+func (s *state) handle(ctx context.Context, line string) bool {
+	stop, err := s.execute(ctx, line)
+	if err != nil {
+		fmt.Fprintf(s.out, "error: %v\n", err)
+	}
+	return stop
+}
+
 func (s *state) prompt() string {
-	cwd := s.site.CWD
 	if current, err := s.app.DB.SiteByID(context.Background(), s.site.ID); err == nil {
 		s.site = current
-		cwd = current.CWD
 	}
-	return fmt.Sprintf("%s:%s > ", s.site.Name, cwd)
+	return fmt.Sprintf("%s:%s > ", s.site.Name, s.site.CWD)
 }
 
 func (s *state) execute(ctx context.Context, line string) (bool, error) {
 	args, err := Split(strings.TrimSpace(line))
-	if err != nil {
+	if err != nil || len(args) == 0 {
 		return false, err
 	}
-	if len(args) == 0 {
-		return false, nil
-	}
-	cmd, args := strings.ToLower(args[0]), args[1:]
-	fs := s.app.FS(s.site)
-	switch cmd {
+	switch cmd := strings.ToLower(args[0]); cmd {
 	case "exit", "quit":
 		return true, nil
 	case "clear":
 		fmt.Fprint(s.out, "\x1b[2J\x1b[H")
-		return false, nil
 	case "help":
-		s.help()
-		return false, nil
-	case "pwd":
-		cwd, err := fs.CWD(ctx)
-		if err == nil {
-			fmt.Fprintln(s.out, cwd)
-		}
-		return false, err
-	case "cd":
-		p := "/"
-		if len(args) > 0 {
-			p = args[0]
-		}
-		_, err := fs.ChangeDirectory(ctx, p)
-		return false, err
-	case "ls":
-		p, long, human := shellPath(args, "."), hasFlag(args, "-l"), hasFlag(args, "-h")
-		entries, err := fs.List(ctx, p)
-		if err != nil {
-			return false, err
-		}
-		w := tabwriter.NewWriter(s.out, 0, 4, 2, ' ', 0)
-		defer w.Flush()
-		for _, e := range entries {
-			name := entryName(e)
-			if !long {
-				fmt.Fprintln(w, name)
-				continue
-			}
-			size := output.Raw(entrySize(e))
-			if human {
-				size = output.Size(entrySize(e))
-			}
-			fmt.Fprintf(w, "%s\t%s\n", size, name)
-		}
-		return false, nil
-	case "tree":
-		p := shellPath(args, ".")
-		root, err := fs.Resolve(ctx, p)
-		if err != nil {
-			return false, err
-		}
-		fmt.Fprintln(s.out, entryName(*root))
-		err = fs.Walk(ctx, p, func(e model.Entry) error {
-			if e.ID == root.ID {
-				return nil
-			}
-			relative := strings.TrimPrefix(strings.TrimPrefix(e.NormalizedPath, root.NormalizedPath), "/")
-			depth := strings.Count(relative, "/")
-			fmt.Fprintf(s.out, "%s└── %s\n", strings.Repeat("    ", depth), entryName(e))
-			return nil
-		})
-		return false, err
-	case "stat":
-		if len(args) != 1 {
-			return false, fmt.Errorf("usage: stat <path>")
-		}
-		e, err := fs.Stat(ctx, args[0])
-		if err != nil {
-			return false, err
-		}
-		fmt.Fprintf(s.out, "Path:          %s\nType:          %s\nSize:          %s\nModified:      %s\nMIME:          %s\nURL:           %s\n", e.NormalizedPath, e.Type, output.Size(entrySize(*e)), shellTime(e.ModifiedAt), e.ContentType, e.URL)
-		return false, nil
-	case "du":
-		p := shellPath(args, ".")
-		du, err := fs.DU(ctx, p)
-		if err == nil {
-			fmt.Fprintf(s.out, "Directories: %d\nFiles:       %d\nSize:        %s\n", du.Directories, du.Files, output.Size(du.Bytes))
-		}
-		return false, err
-	case "find":
-		pattern := "*"
-		if len(args) > 0 {
-			pattern = args[0]
-			if !strings.ContainsAny(pattern, "*?[") {
-				pattern = "*" + pattern + "*"
-			}
-		}
-		entries, err := fs.Find(ctx, "/", model.FindOptions{Glob: pattern})
-		if err != nil {
-			return false, err
-		}
-		printPaths(s.out, entries)
-		return false, nil
-	case "search":
-		if len(args) == 0 {
-			return false, fmt.Errorf("usage: search <text>")
-		}
-		entries, err := fs.Search(ctx, "/", strings.Join(args, " "), 0)
-		if err != nil {
-			return false, err
-		}
-		printPaths(s.out, entries)
-		return false, nil
-	case "urls":
-		p := shellPath(args, "/")
-		urls, err := fs.URLs(ctx, p, false)
-		if err != nil {
-			return false, err
-		}
-		for _, u := range urls {
-			fmt.Fprintln(s.out, u)
-		}
-		return false, nil
-	case "download":
-		if len(args) == 0 {
-			return false, fmt.Errorf("usage: download <path>")
-		}
-		result, err := s.app.Download(ctx, s.site, args, s.app.Config.DownloadDirectory, downloader.Options{Concurrency: s.app.Config.DownloadWorkers, Retries: s.app.Config.Retries})
-		fmt.Fprintf(s.out, "Completed: %d  Skipped: %d  Failed: %d\n", result.Completed, result.Skipped, result.Failed)
-		return false, err
-	case "refresh":
-		err := s.app.Crawl(ctx, s.site, hasFlag(args, "--full"))
-		if err == nil {
-			s.site, _ = s.app.DB.SiteByID(ctx, s.site.ID)
-			fmt.Fprintln(s.out, "Index refreshed.")
-		}
-		return false, err
-	case "info":
-		fmt.Fprintf(s.out, "Name: %s\nURL: %s\nFiles: %d\nDirectories: %d\nSize: %s\n", s.site.Name, s.site.CanonicalURL, s.site.FileCount, s.site.DirectoryCount, output.Size(s.site.TotalSize))
-		return false, nil
-	case "errors":
-		items, err := s.app.DB.ListCrawlErrors(ctx, s.site.ID, 100)
-		if err != nil {
-			return false, err
-		}
-		for _, e := range items {
-			fmt.Fprintf(s.out, "%s\t%s\n", e.Path, e.Message)
-		}
-		return false, nil
+		fmt.Fprintln(s.out, helpText)
 	case "sessions":
 		sites, err := s.app.Sessions.List(ctx)
 		if err != nil {
@@ -266,53 +139,60 @@ func (s *state) execute(ctx context.Context, line string) (bool, error) {
 			if site.ID == s.site.ID {
 				mark = "*"
 			}
-			fmt.Fprintf(s.out, "%s %-24s %d files\n", mark, site.Name, site.FileCount)
+			fmt.Fprintf(s.out, "%s %-32s %8d files  %s\n", mark, site.Name, site.FileCount, site.CWD)
 		}
-		return false, nil
 	case "use":
-		if len(args) != 1 {
+		if len(args) != 2 {
 			return false, fmt.Errorf("usage: use <session>")
 		}
-		site, err := s.app.Sessions.Use(ctx, args[0])
-		if err == nil {
-			s.site = site
-			fmt.Fprintf(s.out, "Session changed: %s\n", site.Name)
+		site, err := s.app.Sessions.Use(ctx, args[1])
+		if err != nil {
+			return false, fmt.Errorf("unknown session %q", args[1])
 		}
-		return false, err
+		s.site = site
+		fmt.Fprintf(s.out, "Session changed: %s\n", site.Name)
 	default:
-		return false, fmt.Errorf("unknown command %q; type help", cmd)
+		if s.exec == nil {
+			return false, fmt.Errorf("unknown command %q; type help", cmd)
+		}
+		if !contains(commands, cmd) {
+			return false, fmt.Errorf("unknown command %q; type help", cmd)
+		}
+		if cmd == "cd" && len(args) == 1 {
+			args = append(args, "/")
+		}
+		return false, s.exec(ctx, s.out, s.site.Name, args)
 	}
+	return false, nil
 }
 
-func (s *state) help() {
-	fmt.Fprintln(s.out, `NAVIGATION
-  ls          List directory
-  cd          Change directory
-  pwd         Show current directory
-  tree        Display directory tree
-  stat        Show metadata
-  du          Show indexed disk usage
+const helpText = `NAVIGATION
+  ls [-l] [-h] [--sort name|size|date] [path]   List directory
+  cd <path>                                     Change directory (.., /, relative)
+  pwd                                           Show current directory
+  tree [--depth N] [--dirs-only] [path]         Display directory tree
+  stat <path>                                   Show metadata
+  du [path]                                     Indexed disk usage
 
 SEARCH
-  find        Find indexed paths
-  search      Search indexed metadata
-  urls        Print indexed URLs
+  find [glob] [--ext E] [--size >1GB] [--regex R] [--modified-after DATE] [--type file|directory]
+  search <text>                                 Search names and paths
+  urls [--files-only|--dirs-only] [--ext E]     Print indexed URLs
 
 TRANSFER
-  download    Download files or directories explicitly
+  download <path...> [--segments N] [--output DIR]
 
 SESSION
-  sessions    Show sessions
-  use         Switch session
-  refresh     Refresh current session
-  info        Show session information
-  errors      Show crawl errors
+  sessions          Show sessions
+  use <session>     Switch session (each keeps its own directory)
+  refresh [--full]  Re-index the current session
+  info              Session details
+  errors            Crawl errors
 
 SHELL
-  clear       Clear screen
-  help        Show help
-  exit        Exit dirclone`)
-}
+  clear  help  exit  (Ctrl+D exits, Tab completes, Up/Down history)
+
+Quote paths with spaces: cd "my dir"`
 
 func (s *state) complete(ctx context.Context, line string, pos int) (string, int, bool) {
 	if pos > len(line) {
@@ -329,7 +209,23 @@ func (s *state) complete(ctx context.Context, line string, pos int) (string, int
 			}
 		}
 	} else {
-		matches, _ = s.app.FS(s.site).Complete(ctx, word)
+		head := strings.ToLower(strings.Fields(prefix)[0])
+		switch {
+		case head == "use":
+			sites, _ := s.app.Sessions.List(ctx)
+			for _, site := range sites {
+				if strings.HasPrefix(site.Name, word) {
+					matches = append(matches, site.Name)
+				}
+			}
+		case pathCommands[head]:
+			matches, _ = s.app.FS(s.site).Complete(ctx, word)
+			for i, m := range matches {
+				if strings.ContainsAny(m, " \t\"'\\") {
+					matches[i] = strings.ReplaceAll(m, " ", `\ `)
+				}
+			}
+		}
 	}
 	if len(matches) == 0 {
 		return line, pos, true
@@ -339,66 +235,30 @@ func (s *state) complete(ctx context.Context, line string, pos int) (string, int
 	if len(matches) > 1 {
 		replacement = commonPrefix(matches)
 		if replacement == word {
-			fmt.Fprintf(s.out, "\n%s\n", strings.Join(matches, "  "))
+			fmt.Fprintf(s.out, "%s\n", strings.Join(matches, "  "))
 			return line, pos, true
 		}
+	} else if !strings.HasSuffix(replacement, "/") {
+		replacement += " "
 	}
-	updated := line[:start] + replacement + line[pos:]
-	return updated, start + len(replacement), true
+	return line[:start] + replacement + line[pos:], start + len(replacement), true
 }
 
 func commonPrefix(items []string) string {
-	if len(items) == 0 {
-		return ""
-	}
 	p := items[0]
 	for _, item := range items[1:] {
-		for !strings.HasPrefix(item, p) && p != "" {
+		for !strings.HasPrefix(item, p) {
 			p = p[:len(p)-1]
 		}
 	}
 	return p
 }
-func shellPath(args []string, fallback string) string {
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") {
-			return arg
-		}
-	}
-	return fallback
-}
-func hasFlag(args []string, flag string) bool {
-	for _, arg := range args {
-		if arg == flag || strings.Contains(arg, flag) {
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
 			return true
 		}
 	}
 	return false
-}
-func entryName(e model.Entry) string {
-	name := e.Name
-	if e.NormalizedPath == "/" {
-		name = "/"
-	}
-	if e.IsDir() && name != "/" {
-		name += "/"
-	}
-	return name
-}
-func entrySize(e model.Entry) int64 {
-	if e.Size == nil {
-		return -1
-	}
-	return *e.Size
-}
-func shellTime(t *time.Time) string {
-	if t == nil {
-		return "-"
-	}
-	return t.Local().Format("2006-01-02 15:04")
-}
-func printPaths(out io.Writer, entries []model.Entry) {
-	for _, e := range entries {
-		fmt.Fprintln(out, path.Clean(strings.TrimPrefix(e.NormalizedPath, "/")))
-	}
 }

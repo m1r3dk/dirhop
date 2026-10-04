@@ -32,6 +32,8 @@ type App struct {
 	HTTP     *httpclient.Client
 	// Progress, when set, receives live crawl counters.
 	Progress func(model.CrawlRun)
+	// Logging records whether HTTP request logging is already enabled.
+	Logging bool
 }
 
 func (a *App) report(run *model.CrawlRun) {
@@ -179,7 +181,7 @@ func (a *App) finishRun(ctx context.Context, site *model.Site, run *model.CrawlR
 
 func (a *App) Download(ctx context.Context, site *model.Site, paths []string, destination string, opts downloader.Options) (downloader.Result, error) {
 	source := &downloadSource{fs: a.FS(site)}
-	d := &downloader.Downloader{Source: source, Client: a.HTTP.HTTPClient()}
+	d := &downloader.Downloader{Source: source, Client: a.HTTP.HTTPClient(), State: &downloadState{db: a.DB, siteID: site.ID}}
 	result, err := d.Download(ctx, paths, destination, opts)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", ErrDownload, err)
@@ -218,7 +220,7 @@ func (s *downloadSource) Expand(ctx context.Context, paths []string) ([]download
 			if entry.Size != nil {
 				size = *entry.Size
 			}
-			out = append(out, downloader.Entry{Path: rel, URL: entry.URL, Size: size})
+			out = append(out, downloader.Entry{Path: rel, URL: entry.URL, Size: size, ID: entry.ID})
 		}
 	}
 	return out, nil

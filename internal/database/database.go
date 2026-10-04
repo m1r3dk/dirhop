@@ -607,6 +607,33 @@ func (d *DB) ListCrawlErrors(ctx context.Context, siteID int64, limit int) ([]mo
 	return out, rows.Err()
 }
 
+// ListDownloads returns recent download records for a site, newest first.
+func (d *DB) ListDownloads(ctx context.Context, siteID int64, limit int) ([]model.Download, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := d.sql.QueryContext(ctx, `SELECT id,site_id,entry_id,source_url,destination,status,bytes_done,total_bytes,error,created_at,updated_at,completed_at FROM downloads WHERE site_id=? ORDER BY updated_at DESC LIMIT ?`, siteID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Download
+	for rows.Next() {
+		var x model.Download
+		var total, completed sql.NullInt64
+		var created, updated int64
+		if err := rows.Scan(&x.ID, &x.SiteID, &x.EntryID, &x.SourceURL, &x.Destination, &x.Status, &x.BytesDone, &total, &x.Error, &created, &updated, &completed); err != nil {
+			return nil, err
+		}
+		if total.Valid {
+			x.TotalBytes = &total.Int64
+		}
+		x.CreatedAt, x.UpdatedAt, x.CompletedAt = fromUnix(created), fromUnix(updated), fromNullTime(completed)
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) UpsertDownload(ctx context.Context, x *model.Download) error {
 	if x == nil || x.SiteID == 0 || x.EntryID == 0 || x.Destination == "" {
 		return errors.New("invalid download")

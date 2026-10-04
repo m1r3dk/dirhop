@@ -46,7 +46,6 @@ func Execute() error {
 }
 
 func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(), error) {
-	var opt options
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, func() {}, err
@@ -54,6 +53,18 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 	application, err := app.Open(cfg)
 	if err != nil {
 		return nil, func() {}, err
+	}
+	return newCommandTree(application, &options{}, stdout, stderr), func() { _ = application.Close() }, nil
+}
+
+// newCommandTree builds the full command set. The interactive shell builds a
+// fresh tree per input line, so both interfaces share one implementation.
+func newCommandTree(application *app.App, optp *options, stdout, stderr io.Writer) *cobra.Command {
+	opt := optp
+	cfg := application.Config
+	var err error
+	runShell := func(ctx context.Context, site *model.Site) error {
+		return shell.Run(ctx, application, site, os.Stdin, stdout, shellExec(application))
 	}
 
 	root := &cobra.Command{
@@ -83,11 +94,14 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 				}
 			} else {
 				site, err = application.Site(ctx, opt.session)
+				if errors.Is(err, app.ErrNoSession) && opt.session == "" {
+					site, err = pickSession(ctx, application, os.Stdin, stdout)
+				}
 				if err != nil {
 					return err
 				}
 			}
-			return shell.Run(ctx, application, site, os.Stdin, stdout)
+			return runShell(ctx, site)
 		},
 	}
 	root.SetOut(stdout)
@@ -95,6 +109,10 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 	var progressDone func()
 	root.PersistentPreRun = func(*cobra.Command, []string) {
 		application.Progress, progressDone = progressPrinter(stderr, opt.quiet || opt.json)
+		if (opt.verbose || opt.debug) && !application.Logging {
+			application.HTTP.EnableLogging(stderr)
+			application.Logging = true
+		}
 	}
 	root.PersistentPostRun = func(*cobra.Command, []string) {
 		if progressDone != nil {
@@ -102,22 +120,40 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 		}
 	}
 	flags := root.PersistentFlags()
-	flags.StringVarP(&opt.session, "session", "s", "", "session name or ID")
+	flags.StringVarP(&opt.session, "session", "s", opt.session, "session name or ID")
 	flags.StringVar(&opt.config, "config", cfg.Paths.ConfigFile, "configuration file")
 	flags.StringVar(&opt.url, "url", "", "select or create a session by URL for this command")
 	flags.StringVar(&opt.name, "name", "", "custom name when creating a URL session")
 	flags.BoolVar(&opt.json, "json", false, "emit JSON")
-	flags.BoolVar(&opt.quiet, "quiet", false, "suppress non-essential output")
+	flags.BoolVar(&opt.quiet, "quiet", opt.quiet, "suppress non-essential output")
 	flags.BoolVar(&opt.noColor, "no-color", false, "disable color output")
 	flags.BoolVarP(&opt.verbose, "verbose", "v", false, "show verbose diagnostics")
 	flags.BoolVar(&opt.debug, "debug", false, "show debug diagnostics")
 
-	addCommands(root, application, &opt, stdout)
-	return root, func() { _ = application.Close() }, nil
+	addCommands(root, application, opt, stdout)
+	root.AddCommand(&cobra.Command{Use: "open <url>", Short: "Open (or create) a URL session and start the shell", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		site, _, err := application.OpenURL(cmd.Context(), args[0], opt.name, true)
+		if err != nil {
+			return err
+		}
+		return runShell(cmd.Context(), site)
+	}})
+	return root
+}
+
+// shellExec runs one shell line through a fresh command tree pinned to the
+// shell's current session.
+func shellExec(a *app.App) shell.Exec {
+	return func(ctx context.Context, out io.Writer, session string, args []string) error {
+		// cd is silent in the shell; the prompt already shows the new directory.
+		tree := newCommandTree(a, &options{session: session, quiet: args[0] == "cd"}, out, out)
+		tree.SetArgs(args)
+		return tree.ExecuteContext(ctx)
+	}
 }
 
 func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
-	root.AddCommand(newOpen(a, opt, out), newScan(a, opt, out))
+	root.AddCommand(newScan(a, opt, out))
 	root.AddCommand(newLS(a, opt, out), newCD(a, opt, out), newPWD(a, opt, out))
 	root.AddCommand(newTree(a, opt, out), newStat(a, opt, out), newDU(a, opt, out))
 	root.AddCommand(newFind(a, opt, out), newSearch(a, opt, out), newURLs(a, opt, out))
@@ -125,16 +161,33 @@ func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
 	root.AddCommand(newInfo(a, opt, out), newErrors(a, opt, out))
 	root.AddCommand(newSessions(a, opt, out), newSession(a, opt, out))
 	root.AddCommand(newConfig(a, out))
+	root.AddCommand(newDownloads(a, opt, out))
 }
 
-func newOpen(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "open <url>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		site, _, err := a.OpenURL(cmd.Context(), args[0], opt.name, true)
+func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {
+	var limit int
+	cmd := &cobra.Command{Use: "downloads", Short: "Show recorded download state for the session", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
 		}
-		return shell.Run(cmd.Context(), a, site, os.Stdin, out)
+		items, err := a.DB.ListDownloads(cmd.Context(), site.ID, limit)
+		if err != nil || opt.json {
+			if err == nil {
+				err = output.JSON(out, items)
+			}
+			return err
+		}
+		w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+		defer w.Flush()
+		fmt.Fprintln(w, "STATUS\tBYTES\tUPDATED\tDESTINATION")
+		for _, d := range items {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", d.Status, output.Size(d.BytesDone), d.UpdatedAt.Local().Format("2006-01-02 15:04"), d.Destination)
+		}
+		return nil
 	}}
+	cmd.Flags().IntVar(&limit, "limit", 100, "maximum records")
+	return cmd
 }
 
 func newScan(a *app.App, opt *options, out io.Writer) *cobra.Command {

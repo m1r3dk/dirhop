@@ -377,20 +377,18 @@ func linkLooksDirectory(href, label string) bool {
 	return strings.HasSuffix(pathPart, "/") || strings.HasSuffix(strings.TrimSpace(label), "/")
 }
 
+// entryName uses the decoded last URL segment. Link labels are display text:
+// Apache truncates long names ("long-na..>"), and generic pages use captions
+// ("Annual report"), so they cannot serve as filesystem names.
 func entryName(target *url.URL, label string, directory bool) string {
-	name := strings.TrimSpace(label)
-	name = strings.TrimSuffix(name, "/")
-	if name == "" || name == "." || name == ".." {
-		escaped := strings.TrimSuffix(target.EscapedPath(), "/")
-		name = path.Base(escaped)
-		if decoded, err := url.PathUnescape(name); err == nil {
-			name = decoded
-		}
+	name := path.Base(strings.TrimSuffix(target.EscapedPath(), "/"))
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
 	}
-	if directory {
-		name = strings.TrimSuffix(name, "/")
+	if name == "" || name == "/" || name == "." {
+		name = strings.TrimSuffix(strings.TrimSpace(label), "/")
 	}
-	return strings.TrimSpace(name)
+	return name
 }
 
 func canonicalHost(target *url.URL) string {
