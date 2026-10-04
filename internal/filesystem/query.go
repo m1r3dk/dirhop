@@ -1,4 +1,4 @@
-package cli
+package filesystem
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func parseSize(value string) (int64, error) {
+func ParseSize(value string) (int64, error) {
 	s := strings.TrimSpace(strings.ToUpper(value))
 	if s == "" {
 		return 0, fmt.Errorf("empty size")
@@ -35,17 +35,17 @@ func parseSize(value string) (int64, error) {
 	return int64(n * factor), nil
 }
 
-func parseSizeFilter(value string) (min, max *int64, err error) {
+func ParseSizeFilter(value string) (min, max *int64, err error) {
 	s := strings.TrimSpace(value)
 	if s == "" {
 		return nil, nil, nil
 	}
 	if left, right, ok := strings.Cut(s, ".."); ok {
-		a, e := parseSize(left)
+		a, e := ParseSize(left)
 		if e != nil {
 			return nil, nil, e
 		}
-		b, e := parseSize(right)
+		b, e := ParseSize(right)
 		if e != nil {
 			return nil, nil, e
 		}
@@ -55,20 +55,20 @@ func parseSizeFilter(value string) (min, max *int64, err error) {
 		return &a, &b, nil
 	}
 	if strings.HasPrefix(s, ">") {
-		n, e := parseSize(strings.TrimPrefix(s, ">"))
+		n, e := ParseSize(strings.TrimPrefix(s, ">"))
 		if e != nil {
 			return nil, nil, e
 		}
 		return &n, nil, nil
 	}
 	if strings.HasPrefix(s, "<") {
-		n, e := parseSize(strings.TrimPrefix(s, "<"))
+		n, e := ParseSize(strings.TrimPrefix(s, "<"))
 		if e != nil {
 			return nil, nil, e
 		}
 		return nil, &n, nil
 	}
-	n, e := parseSize(s)
+	n, e := ParseSize(s)
 	if e != nil {
 		return nil, nil, e
 	}

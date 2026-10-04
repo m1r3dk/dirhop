@@ -389,7 +389,7 @@ func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		if ext != "" {
 			find.Extensions = strings.Split(ext, ",")
 		}
-		find.MinSize, find.MaxSize, err = parseSizeFilter(sizeRange)
+		find.MinSize, find.MaxSize, err = filesystem.ParseSizeFilter(sizeRange)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 		}
@@ -537,7 +537,7 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		rate := int64(0)
 		if maxRate != "" {
-			rate, err = parseSize(maxRate)
+			rate, err = filesystem.ParseSize(maxRate)
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 			}

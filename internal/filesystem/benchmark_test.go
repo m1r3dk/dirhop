@@ -10,7 +10,7 @@ import (
 	"github.com/1jehuang/dirclone/internal/model"
 )
 
-func BenchmarkFind10000(b *testing.B) {
+func BenchmarkFind500k(b *testing.B) {
 	ctx := context.Background()
 	db, err := database.Open(":memory:")
 	if err != nil {
@@ -23,9 +23,9 @@ func BenchmarkFind10000(b *testing.B) {
 	}
 	root, _ := db.EntryByPath(ctx, site.ID, "/", false)
 	now := time.Now()
-	entries := make([]model.Entry, 10_000)
+	entries := make([]model.Entry, 500_000)
 	for i := range entries {
-		name := fmt.Sprintf("file-%05d.zip", i)
+		name := fmt.Sprintf("file-%06d.zip", i)
 		size := int64(i)
 		entries[i] = model.Entry{SiteID: site.ID, ParentID: &root.ID, Name: name, NormalizedPath: "/" + name, URL: "https://example.test/" + name, Type: model.EntryTypeFile, Size: &size, LastSeenAt: now}
 	}
@@ -35,7 +35,7 @@ func BenchmarkFind10000(b *testing.B) {
 	fs := New(db, site.ID)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := fs.Find(ctx, "/", model.FindOptions{Glob: "*.zip", MinSize: ptr(int64(9000))}); err != nil {
+		if _, err := fs.Find(ctx, "/", model.FindOptions{Glob: "*.zip", MinSize: ptr(int64(499000))}); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -94,7 +94,8 @@ func (f *FS) CWD(ctx context.Context) (string, error) {
 	return s.CWD, nil
 }
 
-// Walk invokes fn for the root and every descendant in path order.
+// Walk invokes fn for the root and every descendant in path order, streaming
+// rows from SQLite.
 func (f *FS) Walk(ctx context.Context, root string, fn func(model.Entry) error) error {
 	if fn == nil {
 		return errors.New("walk callback is nil")
@@ -103,19 +104,7 @@ func (f *FS) Walk(ctx context.Context, root string, fn func(model.Entry) error) 
 	if err != nil {
 		return err
 	}
-	entries, err := f.db.EntriesUnder(ctx, f.siteID, e.NormalizedPath, false)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if err = ctx.Err(); err != nil {
-			return err
-		}
-		if err = fn(entry); err != nil {
-			return err
-		}
-	}
-	return nil
+	return f.db.ScanEntries(ctx, f.siteID, e.NormalizedPath, database.EntryFilter{IncludeRoot: true}, fn)
 }
 
 // FilesUnder expands a file or directory into downloadable file entries.
@@ -127,136 +116,96 @@ func (f *FS) FilesUnder(ctx context.Context, root string) ([]model.Entry, error)
 	if e.IsFile() {
 		return []model.Entry{*e}, nil
 	}
-	if !e.IsDir() {
-		return []model.Entry{}, nil
-	}
-	all, err := f.db.EntriesUnder(ctx, f.siteID, e.NormalizedPath, false)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]model.Entry, 0)
-	for _, x := range all {
-		if x.IsFile() {
-			out = append(out, x)
-		}
+	if !e.IsDir() {
+		return out, nil
 	}
-	return out, nil
+	err = f.db.ScanEntries(ctx, f.siteID, e.NormalizedPath, database.EntryFilter{Type: model.EntryTypeFile}, func(x model.Entry) error {
+		out = append(out, x)
+		return nil
+	})
+	return out, err
 }
 
-// Find filters entries beneath root. Glob matches either the base name or path
-// relative to root. Regex is compiled once and applied to the normalized path.
+// Find filters entries beneath root. Indexed constraints (type, extension,
+// size, date, name glob) run in SQLite; regex and path globs run on the
+// already-narrowed stream.
 func (f *FS) Find(ctx context.Context, root string, opt model.FindOptions) ([]model.Entry, error) {
 	e, err := f.Resolve(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	all, err := f.db.EntriesUnder(ctx, f.siteID, e.NormalizedPath, opt.IncludeRemoved)
-	if err != nil {
-		return nil, err
-	}
 	var re *regexp.Regexp
 	if opt.Regex != "" {
-		re, err = regexp.Compile(opt.Regex)
-		if err != nil {
+		if re, err = regexp.Compile(opt.Regex); err != nil {
 			return nil, fmt.Errorf("invalid regex: %w", err)
 		}
 	}
-	exts := map[string]struct{}{}
-	for _, x := range opt.Extensions {
-		x = strings.ToLower(x)
-		if x != "" && !strings.HasPrefix(x, ".") {
-			x = "." + x
-		}
-		exts[x] = struct{}{}
+	filter := database.EntryFilter{
+		IncludeRemoved: opt.IncludeRemoved, Type: opt.Type, Extensions: opt.Extensions,
+		MinSize: opt.MinSize, MaxSize: opt.MaxSize,
+		ModifiedAfter: opt.ModifiedAfter, ModifiedBefore: opt.ModifiedBefore,
+	}
+	pathGlob := strings.Contains(opt.Glob, "/")
+	if opt.Glob != "" && !pathGlob {
+		filter.NameGlob = opt.Glob
 	}
 	out := make([]model.Entry, 0)
-	for _, x := range all {
-		if x.NormalizedPath == e.NormalizedPath && e.IsDir() {
-			continue
-		}
-		if opt.Type != "" && x.Type != opt.Type {
-			continue
-		}
-		if len(exts) > 0 {
-			if _, ok := exts[strings.ToLower(x.Extension)]; !ok {
-				continue
-			}
-		}
-		if opt.MinSize != nil && (x.Size == nil || *x.Size < *opt.MinSize) {
-			continue
-		}
-		if opt.MaxSize != nil && (x.Size == nil || *x.Size > *opt.MaxSize) {
-			continue
-		}
-		if opt.ModifiedAfter != nil && (x.ModifiedAt == nil || x.ModifiedAt.Before(*opt.ModifiedAfter)) {
-			continue
-		}
-		if opt.ModifiedBefore != nil && (x.ModifiedAt == nil || x.ModifiedAt.After(*opt.ModifiedBefore)) {
-			continue
-		}
-		rel := strings.TrimPrefix(strings.TrimPrefix(x.NormalizedPath, e.NormalizedPath), "/")
-		if opt.Glob != "" {
-			a, _ := path.Match(opt.Glob, x.Name)
-			b, _ := path.Match(opt.Glob, rel)
-			if !a && !b {
-				continue
+	errLimit := errors.New("limit")
+	err = f.db.ScanEntries(ctx, f.siteID, e.NormalizedPath, filter, func(x model.Entry) error {
+		if pathGlob {
+			rel := strings.TrimPrefix(strings.TrimPrefix(x.NormalizedPath, e.NormalizedPath), "/")
+			if ok, _ := path.Match(opt.Glob, rel); !ok {
+				return nil
 			}
 		}
 		if re != nil && !re.MatchString(x.NormalizedPath) {
-			continue
+			return nil
 		}
 		out = append(out, x)
 		if opt.Limit > 0 && len(out) >= opt.Limit {
-			break
+			return errLimit
 		}
+		return nil
+	})
+	if errors.Is(err, errLimit) {
+		err = nil
 	}
-	return out, nil
+	return out, err
 }
 
 // Search performs a case-insensitive literal search over names and paths.
 func (f *FS) Search(ctx context.Context, root, query string, limit int) ([]model.Entry, error) {
-	query = strings.ToLower(strings.TrimSpace(query))
+	query = strings.TrimSpace(query)
+	out := make([]model.Entry, 0)
 	if query == "" {
-		return []model.Entry{}, nil
+		return out, nil
 	}
-	all, err := f.Find(ctx, root, model.FindOptions{})
+	e, err := f.Resolve(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]model.Entry, 0)
-	for _, e := range all {
-		if strings.Contains(strings.ToLower(e.Name), query) || strings.Contains(strings.ToLower(e.NormalizedPath), query) {
-			out = append(out, e)
-			if limit > 0 && len(out) >= limit {
-				break
-			}
+	errLimit := errors.New("limit")
+	err = f.db.ScanEntries(ctx, f.siteID, e.NormalizedPath, database.EntryFilter{Substring: query}, func(x model.Entry) error {
+		out = append(out, x)
+		if limit > 0 && len(out) >= limit {
+			return errLimit
 		}
+		return nil
+	})
+	if errors.Is(err, errLimit) {
+		err = nil
 	}
-	return out, nil
+	return out, err
 }
 
+// DiskUsage aggregates a subtree inside SQLite without loading entries.
 func (f *FS) DiskUsage(ctx context.Context, root string) (model.DiskUsage, error) {
 	e, err := f.Resolve(ctx, root)
 	if err != nil {
 		return model.DiskUsage{}, err
 	}
-	all, err := f.db.EntriesUnder(ctx, f.siteID, e.NormalizedPath, false)
-	if err != nil {
-		return model.DiskUsage{}, err
-	}
-	var d model.DiskUsage
-	for _, x := range all {
-		switch x.Type {
-		case model.EntryTypeFile:
-			d.Files++
-			if x.Size != nil {
-				d.Bytes += *x.Size
-			}
-		case model.EntryTypeDirectory:
-			d.Directories++
-		}
-	}
-	return d, nil
+	return f.db.DiskUsage(ctx, f.siteID, e.NormalizedPath)
 }
 func (f *FS) DU(ctx context.Context, root string) (model.DiskUsage, error) {
 	return f.DiskUsage(ctx, root)
@@ -269,17 +218,18 @@ func (f *FS) URLs(ctx context.Context, root string, includeDirectories bool) ([]
 	if err != nil {
 		return nil, err
 	}
-	all, err := f.db.EntriesUnder(ctx, f.siteID, e.NormalizedPath, false)
-	if err != nil {
-		return nil, err
+	filter := database.EntryFilter{}
+	if !includeDirectories {
+		filter.Type = model.EntryTypeFile
 	}
-	out := make([]string, 0, len(all))
-	for _, x := range all {
-		if x.IsFile() || (includeDirectories && x.IsDir()) {
+	out := make([]string, 0)
+	err = f.db.ScanEntries(ctx, f.siteID, e.NormalizedPath, filter, func(x model.Entry) error {
+		if x.IsFile() || x.IsDir() {
 			out = append(out, x.URL)
 		}
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
 // Complete returns index-only path completions and never accesses the network.

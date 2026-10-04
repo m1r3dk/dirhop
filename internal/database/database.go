@@ -288,18 +288,114 @@ func (d *DB) TouchDirectFiles(ctx context.Context, siteID, parentID int64, seen 
 
 // EntriesUnder returns the root and all descendants in path order.
 func (d *DB) EntriesUnder(ctx context.Context, siteID int64, root string, includeRemoved bool) ([]model.Entry, error) {
-	q := `SELECT ` + entryColumns + ` FROM entries WHERE site_id=? AND (normalized_path=? OR normalized_path LIKE ? ESCAPE '^')`
-	args := []any{siteID, root, escapeLike(strings.TrimSuffix(root, "/")) + "/%"}
-	if !includeRemoved {
-		q += ` AND removed=0`
+	var out []model.Entry
+	err := d.ScanEntries(ctx, siteID, root, EntryFilter{IncludeRoot: true, IncludeRemoved: includeRemoved}, func(e model.Entry) error {
+		out = append(out, e)
+		return nil
+	})
+	return out, err
+}
+
+// EntryFilter is evaluated inside SQLite so large indexes are never loaded
+// wholesale into memory. Zero values mean no constraint.
+type EntryFilter struct {
+	IncludeRoot    bool
+	IncludeRemoved bool
+	Type           model.EntryType
+	NameGlob       string // SQLite GLOB on the base name
+	Substring      string // case-insensitive match on name or path
+	Extensions     []string
+	MinSize        *int64
+	MaxSize        *int64
+	ModifiedAfter  *time.Time
+	ModifiedBefore *time.Time
+}
+
+func subtreeWhere(siteID int64, root string, f EntryFilter) (string, []any) {
+	where := `site_id=?`
+	args := []any{siteID}
+	if root != "/" {
+		where += ` AND (normalized_path LIKE ? ESCAPE '^'`
+		args = append(args, escapeLike(strings.TrimSuffix(root, "/"))+"/%")
+		if f.IncludeRoot {
+			where += ` OR normalized_path=?`
+			args = append(args, root)
+		}
+		where += `)`
+	} else if !f.IncludeRoot {
+		where += ` AND normalized_path<>'/'`
 	}
-	q += ` ORDER BY normalized_path COLLATE NOCASE`
-	rows, err := d.sql.QueryContext(ctx, q, args...)
+	if !f.IncludeRemoved {
+		where += ` AND removed=0`
+	}
+	if f.Type != "" {
+		where += ` AND type=?`
+		args = append(args, f.Type)
+	}
+	if f.NameGlob != "" {
+		where += ` AND name GLOB ?`
+		args = append(args, f.NameGlob)
+	}
+	if f.Substring != "" {
+		where += ` AND (name LIKE ? ESCAPE '^' OR normalized_path LIKE ? ESCAPE '^')`
+		like := "%" + escapeLike(f.Substring) + "%"
+		args = append(args, like, like)
+	}
+	if len(f.Extensions) > 0 {
+		where += ` AND extension COLLATE NOCASE IN (` + strings.TrimSuffix(strings.Repeat("?,", len(f.Extensions)), ",") + `)`
+		for _, ext := range f.Extensions {
+			ext = strings.ToLower(strings.TrimSpace(ext))
+			if ext != "" && !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			args = append(args, ext)
+		}
+	}
+	if f.MinSize != nil {
+		where += ` AND size>=?`
+		args = append(args, *f.MinSize)
+	}
+	if f.MaxSize != nil {
+		where += ` AND size<=?`
+		args = append(args, *f.MaxSize)
+	}
+	if f.ModifiedAfter != nil {
+		where += ` AND modified_at>=?`
+		args = append(args, unix(*f.ModifiedAfter))
+	}
+	if f.ModifiedBefore != nil {
+		where += ` AND modified_at<=?`
+		args = append(args, unix(*f.ModifiedBefore))
+	}
+	return where, args
+}
+
+// ScanEntries streams matching entries beneath root in path order.
+func (d *DB) ScanEntries(ctx context.Context, siteID int64, root string, f EntryFilter, fn func(model.Entry) error) error {
+	where, args := subtreeWhere(siteID, root, f)
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+entryColumns+` FROM entries WHERE `+where+` ORDER BY normalized_path COLLATE NOCASE`, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	return scanEntryRows(rows)
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(*e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// DiskUsage aggregates a subtree inside SQLite.
+func (d *DB) DiskUsage(ctx context.Context, siteID int64, root string) (model.DiskUsage, error) {
+	where, args := subtreeWhere(siteID, root, EntryFilter{IncludeRoot: true})
+	var du model.DiskUsage
+	err := d.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(type='file'),0), COALESCE(SUM(type='directory'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE `+where, args...).Scan(&du.Files, &du.Directories, &du.Bytes)
+	return du, err
 }
 func scanEntryRows(rows *sql.Rows) ([]model.Entry, error) {
 	var out []model.Entry
@@ -319,6 +415,29 @@ func escapeLike(s string) string {
 
 // UpsertEntries writes a crawler batch atomically and returns entries with IDs populated.
 func (d *DB) UpsertEntries(ctx context.Context, entries []model.Entry) ([]model.Entry, error) {
+	return d.upsertEntries(ctx, entries, true)
+}
+
+// UpsertEntriesNoRecount is used by crawls, which recount once at the end
+// instead of rescanning the whole site after every directory.
+func (d *DB) UpsertEntriesNoRecount(ctx context.Context, entries []model.Entry) ([]model.Entry, error) {
+	return d.upsertEntries(ctx, entries, false)
+}
+
+// Recount refreshes a site's aggregate counters.
+func (d *DB) Recount(ctx context.Context, siteID int64) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := recountTx(ctx, tx, siteID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) upsertEntries(ctx context.Context, entries []model.Entry, recount bool) ([]model.Entry, error) {
 	if len(entries) == 0 {
 		return []model.Entry{}, nil
 	}
@@ -327,6 +446,11 @@ func (d *DB) UpsertEntries(ctx context.Context, entries []model.Entry) ([]model.
 		return nil, err
 	}
 	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,size,modified_at,etag,last_modified,content_type,extension,removed,created_at,updated_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,normalized_path) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,url=excluded.url,type=excluded.type,size=excluded.size,modified_at=excluded.modified_at,etag=excluded.etag,last_modified=excluded.last_modified,content_type=excluded.content_type,extension=excluded.extension,removed=excluded.removed,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at RETURNING id,created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
 	out := make([]model.Entry, len(entries))
 	for i, e := range entries {
 		if e.SiteID == 0 || e.NormalizedPath == "" || e.URL == "" {
@@ -348,18 +472,15 @@ func (d *DB) UpsertEntries(ctx context.Context, entries []model.Entry) ([]model.
 		if e.Extension == "" && e.Type == model.EntryTypeFile {
 			e.Extension = strings.ToLower(filepath.Ext(e.Name))
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,size,modified_at,etag,last_modified,content_type,extension,removed,created_at,updated_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,normalized_path) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,url=excluded.url,type=excluded.type,size=excluded.size,modified_at=excluded.modified_at,etag=excluded.etag,last_modified=excluded.last_modified,content_type=excluded.content_type,extension=excluded.extension,removed=excluded.removed,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at`, e.SiteID, e.ParentID, e.Name, e.NormalizedPath, e.URL, e.Type, e.Size, nullableTime(e.ModifiedAt), e.ETag, e.LastModified, e.ContentType, e.Extension, boolInt(e.Removed), unix(e.CreatedAt), unix(e.UpdatedAt), unix(e.LastSeenAt))
-		if err != nil {
+		if err := stmt.QueryRowContext(ctx, e.SiteID, e.ParentID, e.Name, e.NormalizedPath, e.URL, e.Type, e.Size, nullableTime(e.ModifiedAt), e.ETag, e.LastModified, e.ContentType, e.Extension, boolInt(e.Removed), unix(e.CreatedAt), unix(e.UpdatedAt), unix(e.LastSeenAt)).Scan(&e.ID, newUnixTime(&e.CreatedAt)); err != nil {
 			return nil, fmt.Errorf("upsert %s: %w", e.NormalizedPath, err)
 		}
-		xe, err := scanEntry(tx.QueryRowContext(ctx, `SELECT `+entryColumns+` FROM entries WHERE site_id=? AND normalized_path=?`, e.SiteID, e.NormalizedPath))
-		if err != nil {
+		out[i] = e
+	}
+	if recount {
+		if err = recountTx(ctx, tx, entries[0].SiteID); err != nil {
 			return nil, err
 		}
-		out[i] = *xe
-	}
-	if err = recountTx(ctx, tx, entries[0].SiteID); err != nil {
-		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err

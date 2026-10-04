@@ -143,6 +143,9 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 			return err
 		}
 	}
+	if err := a.DB.Recount(context.WithoutCancel(ctx), site.ID); err != nil {
+		return err
+	}
 	if rootUnsupported {
 		return fmt.Errorf("%w: %s", ErrUnsupportedListing, run.FailureReason)
 	}
@@ -298,7 +301,7 @@ func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.D
 	parent.LastModified = outcome.LastModified
 	parent.LastSeenAt = r.seenAt
 	parent.UpdatedAt = time.Now().UTC()
-	if _, err := r.db.UpsertEntries(ctx, []model.Entry{*parent}); err != nil {
+	if _, err := r.db.UpsertEntriesNoRecount(ctx, []model.Entry{*parent}); err != nil {
 		return err
 	}
 
@@ -322,7 +325,7 @@ func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.D
 		}
 		batch = append(batch, entry)
 	}
-	if _, err := r.db.UpsertEntries(ctx, batch); err != nil {
+	if _, err := r.db.UpsertEntriesNoRecount(ctx, batch); err != nil {
 		return err
 	}
 
