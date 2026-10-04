@@ -50,3 +50,28 @@ func TestLoadRejectsUnknownAndEnsureDirs(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadTOMLSyntax(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	content := `# dirclone
+[crawl]
+workers = 12          # alias for crawl_concurrency
+timeout = "45s"
+[download]
+download_directory = '/tmp/dl # not a comment'
+user_agent = "dirclone \"test\""
+metadata = "full"
+color = false
+`
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CrawlConcurrency != 12 || cfg.HTTPTimeout != 45*time.Second || cfg.DownloadDirectory != "/tmp/dl # not a comment" ||
+		cfg.UserAgent != `dirclone "test"` || cfg.Metadata != "full" || cfg.Color {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}

@@ -128,6 +128,7 @@ func newCommandTree(application *app.App, optp *options, stdout, stderr io.Write
 	flags.BoolVar(&opt.noColor, "no-color", false, "disable color output")
 	flags.BoolVarP(&opt.verbose, "verbose", "v", false, "show verbose diagnostics")
 	flags.BoolVar(&opt.debug, "debug", false, "show debug diagnostics")
+	flags.IntVar(&application.Workers, "workers", 0, "crawl/listing concurrency for this run (default from config, max 64)")
 
 	addCommands(root, application, opt, stdout)
 	root.AddCommand(&cobra.Command{Use: "open <url>", Short: "Open (or create) a URL session and start the shell", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {

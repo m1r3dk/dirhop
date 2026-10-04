@@ -119,15 +119,23 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	for n, raw := range strings.Split(string(b), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := strings.TrimSpace(stripComment(raw))
+		if line == "" {
+			continue
+		}
+		// [section] headers are accepted for TOML compatibility: keys are
+		// unique across sections, so "[crawl]\nworkers=8" style files work.
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return Config{}, fmt.Errorf("config line %d: expected key=value", n+1)
+			return Config{}, fmt.Errorf("config line %d: expected key = value", n+1)
 		}
-		key, value = strings.TrimSpace(key), strings.Trim(strings.TrimSpace(value), `"'`)
+		key, value = strings.TrimSpace(key), unquote(strings.TrimSpace(value))
+		if alias, ok := keyAliases[key]; ok {
+			key = alias
+		}
 		switch key {
 		case "database":
 			cfg.Paths.Database = expandHome(value)
@@ -202,6 +210,45 @@ func expandHome(v string) string {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, strings.TrimPrefix(v, "~/"))
 		}
+	}
+	return v
+}
+
+// keyAliases maps friendly names from the README/example to canonical keys.
+var keyAliases = map[string]string{
+	"workers":       "crawl_concurrency",
+	"timeout":       "http_timeout",
+	"retry_count":   "retries",
+	"download_dir":  "download_directory",
+	"metadata_mode": "metadata",
+	"useragent":     "user_agent",
+}
+
+// stripComment removes a trailing # comment that is not inside quotes.
+func stripComment(line string) string {
+	var quote rune
+	for i, r := range line {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == '#':
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// unquote strips matching TOML string quotes; basic strings honor \" and \\.
+func unquote(v string) string {
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		return v[1 : len(v)-1]
+	}
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return strings.NewReplacer(`\"`, `"`, `\\`, `\`).Replace(v[1 : len(v)-1])
 	}
 	return v
 }

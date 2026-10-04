@@ -69,11 +69,13 @@ The SQLite index is stored in the OS application-data directory:
 - macOS: `~/Library/Application Support/dirclone/dirclone.db`
 - Windows: `%LocalAppData%\\dirclone\\dirclone.db`
 
-Copy `config.example.toml` to the displayed config path from `dirclone config path`. Command flags override configuration.
+Copy `config.example.toml` to the displayed config path from `dirclone config path`. Command flags override configuration. The file uses flat TOML: `key = value`, quoted or bare values, `# comments`, and optional `[section]` headers. Nested tables and arrays are not used. Unknown keys are rejected so typos are caught. Aliases `workers`, `timeout`, and `retry_count` are accepted.
 
 ## Crawling behavior
 
 Public Amazon S3 and Google Cloud Storage buckets are indexed through the documented anonymous ListObjectsV2 API (`?list-type=2`, paginated by continuation token), not HTML scraping. Recognized URLs: `https://<bucket>.s3[.<region>].amazonaws.com/`, `https://s3.amazonaws.com/<bucket>/`, `https://storage.googleapis.com/<bucket>/`, `https://<bucket>.storage.googleapis.com/`, each optionally followed by a key prefix. Key prefixes become directories; object size, ETag, and LastModified are stored. A bucket that refuses anonymous listing exits with code 7.
+
+Bucket listing is parallel. Folders (`delimiter=/` prefixes) are listed concurrently, and large flat folders are split into `start-after` key ranges so one folder with tens of thousands of objects is not a single sequential page chain. Default concurrency is 4x `crawl_concurrency` (max 32) for buckets. Override per run with `--workers N` (max 64) on `scan`/`refresh`/`open`, for both buckets and HTML listings.
 
 The crawler uses bounded concurrency, HTTP keep-alive, retries, redirect checks, same-host and base-path restrictions, duplicate prevention, and parser detection for common Apache, nginx, Python, and generic HTML listings. It follows only links present in listing pages. Normal browsing and searching query SQLite and do not make network requests.
 

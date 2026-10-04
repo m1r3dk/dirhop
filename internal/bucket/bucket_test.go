@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDetect(t *testing.T) {
@@ -87,5 +91,179 @@ func TestListAccessDenied(t *testing.T) {
 	_, err := List(context.Background(), server.Client(), Target{Endpoint: endpoint}, "", func([]Object) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "not public") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// fakeBucket implements ListObjectsV2 semantics: sorted keys, prefix,
+// delimiter roll-up, exclusive start-after, max-keys truncation and opaque
+// continuation tokens. pageSize forces many pages.
+func fakeBucket(t *testing.T, keys []string, pageSize int, delay time.Duration, active, peak *atomic.Int64) *httptest.Server {
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := active.Add(1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		defer active.Add(-1)
+		time.Sleep(delay)
+		q := r.URL.Query()
+		prefix, delim := q.Get("prefix"), q.Get("delimiter")
+		after := q.Get("start-after")
+		if tok := q.Get("continuation-token"); tok != "" {
+			after = tok
+		}
+		var items []string // keys or common prefixes, in order
+		isPrefix := map[string]bool{}
+		for _, k := range sorted {
+			if !strings.HasPrefix(k, prefix) || k <= after {
+				continue
+			}
+			item := k
+			if delim != "" {
+				if i := strings.Index(k[len(prefix):], delim); i >= 0 {
+					item = k[:len(prefix)+i+1]
+					if item <= after || (len(items) > 0 && items[len(items)-1] == item) {
+						continue
+					}
+					isPrefix[item] = true
+				}
+			}
+			items = append(items, item)
+		}
+		truncated := len(items) > pageSize
+		if truncated {
+			items = items[:pageSize]
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "<ListBucketResult><IsTruncated>%v</IsTruncated>", truncated)
+		if truncated {
+			last := items[len(items)-1]
+			if isPrefix[last] {
+				last += "\U0010FFFF" // skip everything under the rolled-up prefix
+			}
+			fmt.Fprintf(&b, "<NextContinuationToken>%s</NextContinuationToken>", html.EscapeString(last))
+		}
+		for _, it := range items {
+			if isPrefix[it] {
+				fmt.Fprintf(&b, "<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>", html.EscapeString(it))
+			} else {
+				fmt.Fprintf(&b, "<Contents><Key>%s</Key><Size>1</Size></Contents>", html.EscapeString(it))
+			}
+		}
+		b.WriteString("</ListBucketResult>")
+		fmt.Fprint(w, b.String())
+	}))
+}
+
+func walkAll(t *testing.T, server *httptest.Server, prefix string, workers int) map[string]int {
+	t.Helper()
+	endpoint, _ := url.Parse(server.URL + "/")
+	got := map[string]int{}
+	_, err := Walk(context.Background(), server.Client(), Target{Endpoint: endpoint, Prefix: prefix}, "", workers, func(objs []Object, _ []string) error {
+		for _, o := range objs {
+			got[o.Key]++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func assertExactlyOnce(t *testing.T, got map[string]int, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d distinct keys, want %d", len(got), len(want))
+	}
+	for _, k := range want {
+		if got[k] != 1 {
+			t.Fatalf("key %q listed %d times", k, got[k])
+		}
+	}
+}
+
+func TestWalkSplitsLargeFlatFolderExactlyOnce(t *testing.T) {
+	var keys []string
+	for i := 0; i < 900; i++ {
+		first := "AaBbMmNnSsvz0_-"[i%15]
+		keys = append(keys, fmt.Sprintf("big/%c%04d.pdf", first, i))
+	}
+	keys = append(keys, "big/日本語.pdf", "big/émile.pdf", "big/~tilde", "big/ space.pdf", "big/sub/x.txt", "big/sub/y.txt", "other/z.txt", "root.txt")
+	var active, peak atomic.Int64
+	server := fakeBucket(t, keys, 25, 2*time.Millisecond, &active, &peak)
+	defer server.Close()
+	for _, workers := range []int{1, 3, 8, 32} {
+		assertExactlyOnce(t, walkAll(t, server, "", workers), keys)
+	}
+	if peak.Load() < 4 {
+		t.Fatalf("flat folder was not listed in parallel: peak=%d", peak.Load())
+	}
+	var bigOnly []string
+	for _, k := range keys {
+		if strings.HasPrefix(k, "big/") {
+			bigOnly = append(bigOnly, k)
+		}
+	}
+	assertExactlyOnce(t, walkAll(t, server, "big/", 8), bigOnly)
+}
+
+func TestWalkFindsAllKeysInParallel(t *testing.T) {
+	var keys []string
+	for d := 0; d < 12; d++ {
+		for f := 0; f < 3; f++ {
+			keys = append(keys, fmt.Sprintf("d%02d/sub/f%d.bin", d, f))
+		}
+	}
+	keys = append(keys, "root.txt", "d00/", "weird//double.txt")
+	var active, peak atomic.Int64
+	server := fakeBucket(t, keys, 1000, 20*time.Millisecond, &active, &peak)
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL + "/")
+	got := map[string]int{}
+	_, err := Walk(context.Background(), server.Client(), Target{Endpoint: endpoint}, "", 6, func(objs []Object, _ []string) error {
+		for _, o := range objs {
+			got[o.Key]++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(keys) {
+		t.Fatalf("got %d keys, want %d: %v", len(got), len(keys), got)
+	}
+	for k, n := range got {
+		if n != 1 {
+			t.Fatalf("key %q listed %d times", k, n)
+		}
+	}
+	if p := peak.Load(); p < 2 || p > 6 {
+		t.Fatalf("peak concurrency %d, want 2..6", p)
+	}
+}
+
+func TestWalkStopsOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("prefix") == "" {
+			fmt.Fprint(w, `<ListBucketResult><CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes><CommonPrefixes><Prefix>b/</Prefix></CommonPrefixes></ListBucketResult>`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	endpoint, _ := url.Parse(server.URL + "/")
+	done := make(chan error, 1)
+	go func() {
+		_, err := Walk(context.Background(), server.Client(), Target{Endpoint: endpoint}, "", 4, func([]Object, []string) error { return nil })
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Walk hung after error")
 	}
 }

@@ -34,6 +34,27 @@ type App struct {
 	Progress func(model.CrawlRun)
 	// Logging records whether HTTP request logging is already enabled.
 	Logging bool
+	// Workers overrides crawl concurrency for the next crawl when > 0.
+	Workers int
+}
+
+// crawlWorkers resolves concurrency: --workers, then config. Sessions created
+// before config support stored a fixed 8; config wins so edits take effect.
+func (a *App) crawlWorkers(_ *model.Site) int {
+	if a.Workers > 0 {
+		return min(a.Workers, 64)
+	}
+	return max(a.Config.CrawlConcurrency, 1)
+}
+
+// bucketWorkers: S3/GCS list endpoints are built for high request rates and
+// each page is ~0.5s of pure latency, so default to 4x crawl concurrency.
+// Measured on a 77k-object GCS bucket: 8 workers 62s, 16 51s, 32 40s.
+func (a *App) bucketWorkers(site *model.Site) int {
+	if a.Workers > 0 {
+		return min(a.Workers, 64)
+	}
+	return min(a.crawlWorkers(site)*4, 32)
 }
 
 func (a *App) report(run *model.CrawlRun) {
@@ -118,10 +139,7 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	}
 	repo := &crawlRepository{db: a.DB, site: site, base: base, run: run, seenAt: run.StartedAt, conditional: mode == model.CrawlModeIncremental}
 	repo.progress = a.report
-	workerCount := site.CrawlConcurrency
-	if workerCount <= 0 {
-		workerCount = a.Config.CrawlConcurrency
-	}
+	workerCount := a.crawlWorkers(site)
 	engine, err := crawler.New(a.HTTP, repo, crawler.Config{
 		BaseURL: base, Workers: workerCount, MaxDepth: 1024, MaxDirectories: 10_000_000,
 		UserAgent: a.Config.UserAgent,
