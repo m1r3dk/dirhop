@@ -67,3 +67,24 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 		t.Fatalf("pwd=%q", got)
 	}
 }
+
+func TestUnknownSessionIsClearExitCode3(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-s", "nosuch", "ls"}, {"session", "use", "nosuch"}, {"session", "rename", "nosuch", "x"}, {"session", "delete", "nosuch", "--yes"}} {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root.SetArgs(args)
+		err = root.Execute()
+		cleanup()
+		if ExitCode(err) != 3 || !strings.Contains(err.Error(), `unknown session "nosuch"`) {
+			t.Fatalf("%v: exit=%d err=%v", args, ExitCode(err), err)
+		}
+	}
+}

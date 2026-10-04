@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -257,11 +256,7 @@ func selected(ctx context.Context, a *app.App, opt *options) (*model.Site, error
 		site, _, err := a.OpenURL(ctx, opt.url, opt.name, false)
 		return site, err
 	}
-	site, err := a.Site(ctx, opt.session)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, app.ErrNoSession
-	}
-	return site, err
+	return a.Site(ctx, opt.session)
 }
 
 func newLS(a *app.App, opt *options, out io.Writer) *cobra.Command {
@@ -740,6 +735,9 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	group := &cobra.Command{Use: "session", Short: "Manage persistent sessions"}
 	group.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }})
 	group.AddCommand(&cobra.Command{Use: "use <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
+			return err
+		}
 		s, err := a.Sessions.Use(cmd.Context(), args[0])
 		if err == nil {
 			fmt.Fprintf(out, "Active session: %s\n", s.Name)
@@ -762,6 +760,9 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		return nil
 	}})
 	group.AddCommand(&cobra.Command{Use: "rename <old> <new>", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
+			return err
+		}
 		s, err := a.Sessions.Rename(cmd.Context(), args[0], args[1])
 		if err == nil {
 			fmt.Fprintf(out, "Renamed session: %s\n", s.Name)
@@ -772,6 +773,9 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	del := &cobra.Command{Use: "delete <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !yes {
 			return fmt.Errorf("%w: session delete requires --yes", ErrInvalidArguments)
+		}
+		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
+			return err
 		}
 		return a.Sessions.Remove(cmd.Context(), args[0])
 	}}

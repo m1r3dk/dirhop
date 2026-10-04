@@ -72,7 +72,10 @@ func (a *App) Close() error {
 func (a *App) Site(ctx context.Context, selector string) (*model.Site, error) {
 	site, err := a.Sessions.Resolve(ctx, selector)
 	if errors.Is(err, session.ErrNoActive) {
-		return nil, ErrNoSession
+		return nil, fmt.Errorf("%w: no active session (use -s <name>, `dirclone session use <name>`, or `dirclone <URL>`)", ErrNoSession)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: unknown session %q (see `dirclone sessions`)", ErrNoSession, selector)
 	}
 	return site, err
 }
