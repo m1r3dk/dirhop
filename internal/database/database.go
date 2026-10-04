@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/1jehuang/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/model"
 	_ "modernc.org/sqlite"
 )
 

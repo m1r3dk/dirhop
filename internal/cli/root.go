@@ -15,13 +15,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/1jehuang/dirclone/internal/app"
-	"github.com/1jehuang/dirclone/internal/config"
-	"github.com/1jehuang/dirclone/internal/downloader"
-	"github.com/1jehuang/dirclone/internal/filesystem"
-	"github.com/1jehuang/dirclone/internal/model"
-	"github.com/1jehuang/dirclone/internal/output"
-	"github.com/1jehuang/dirclone/internal/shell"
+	"github.com/m1r3dk/dirclone/internal/app"
+	"github.com/m1r3dk/dirclone/internal/config"
+	"github.com/m1r3dk/dirclone/internal/downloader"
+	"github.com/m1r3dk/dirclone/internal/filesystem"
+	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/output"
+	"github.com/m1r3dk/dirclone/internal/shell"
 )
 
 type options struct {
@@ -92,6 +92,15 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
+	var progressDone func()
+	root.PersistentPreRun = func(*cobra.Command, []string) {
+		application.Progress, progressDone = progressPrinter(stderr, opt.quiet || opt.json)
+	}
+	root.PersistentPostRun = func(*cobra.Command, []string) {
+		if progressDone != nil {
+			progressDone()
+		}
+	}
 	flags := root.PersistentFlags()
 	flags.StringVarP(&opt.session, "session", "s", "", "session name or ID")
 	flags.StringVar(&opt.config, "config", cfg.Paths.ConfigFile, "configuration file")

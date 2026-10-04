@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/1jehuang/dirclone/internal/parser"
+	"github.com/m1r3dk/dirclone/internal/parser"
 )
 
 const defaultMaxBodyBytes int64 = 8 << 20

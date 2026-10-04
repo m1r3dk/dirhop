@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/1jehuang/dirclone/internal/parser"
+	"github.com/m1r3dk/dirclone/internal/parser"
 )
 
 type memoryRepository struct {

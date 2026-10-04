@@ -3,7 +3,7 @@ package cli
 import (
 	"errors"
 
-	"github.com/1jehuang/dirclone/internal/app"
+	"github.com/m1r3dk/dirclone/internal/app"
 )
 
 func ExitCode(err error) int {

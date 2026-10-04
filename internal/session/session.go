@@ -13,8 +13,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/1jehuang/dirclone/internal/database"
-	"github.com/1jehuang/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/database"
+	"github.com/m1r3dk/dirclone/internal/model"
 )
 
 var ErrNoActive = errors.New("no active session")

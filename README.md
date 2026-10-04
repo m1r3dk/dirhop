@@ -7,7 +7,7 @@
 ## Install
 
 ```sh
-go install github.com/1jehuang/dirclone/cmd/dirclone@latest
+go install github.com/m1r3dk/dirclone/cmd/dirclone@latest
 ```
 
 Or build locally:

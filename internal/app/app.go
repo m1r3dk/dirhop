@@ -12,14 +12,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/1jehuang/dirclone/internal/config"
-	"github.com/1jehuang/dirclone/internal/crawler"
-	"github.com/1jehuang/dirclone/internal/database"
-	"github.com/1jehuang/dirclone/internal/downloader"
-	"github.com/1jehuang/dirclone/internal/filesystem"
-	"github.com/1jehuang/dirclone/internal/httpclient"
-	"github.com/1jehuang/dirclone/internal/model"
-	"github.com/1jehuang/dirclone/internal/session"
+	"github.com/m1r3dk/dirclone/internal/bucket"
+	"github.com/m1r3dk/dirclone/internal/config"
+	"github.com/m1r3dk/dirclone/internal/crawler"
+	"github.com/m1r3dk/dirclone/internal/database"
+	"github.com/m1r3dk/dirclone/internal/downloader"
+	"github.com/m1r3dk/dirclone/internal/filesystem"
+	"github.com/m1r3dk/dirclone/internal/httpclient"
+	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/session"
 )
 
 // App composes the persistent store, HTTP transport, sessions, virtual
@@ -29,6 +30,14 @@ type App struct {
 	DB       *database.DB
 	Sessions *session.Manager
 	HTTP     *httpclient.Client
+	// Progress, when set, receives live crawl counters.
+	Progress func(model.CrawlRun)
+}
+
+func (a *App) report(run *model.CrawlRun) {
+	if a.Progress != nil {
+		a.Progress(*run)
+	}
 }
 
 func Open(cfg config.Config) (*App, error) {
@@ -98,7 +107,12 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	if err := a.DB.StartCrawlRun(ctx, run); err != nil {
 		return err
 	}
+	if target, ok := bucket.Detect(site.CanonicalURL); ok {
+		err := a.crawlBucket(ctx, site, target, run)
+		return a.finishRun(ctx, site, run, err, err != nil, false)
+	}
 	repo := &crawlRepository{db: a.DB, site: site, base: base, run: run, seenAt: run.StartedAt, conditional: mode == model.CrawlModeIncremental}
+	repo.progress = a.report
 	workerCount := site.CrawlConcurrency
 	if workerCount <= 0 {
 		workerCount = a.Config.CrawlConcurrency
@@ -119,7 +133,12 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	rootFailed := repo.rootFailed
 	rootUnsupported := repo.rootUnsupported
 	repo.mu.Unlock()
+	return a.finishRun(ctx, site, run, err, rootFailed, rootUnsupported)
+}
 
+// finishRun records the outcome, reconciles removals only after a clean
+// complete run, recounts aggregates once, and maps failures to exit codes.
+func (a *App) finishRun(ctx context.Context, site *model.Site, run *model.CrawlRun, err error, rootFailed, rootUnsupported bool) error {
 	switch {
 	case errors.Is(err, context.Canceled):
 		run.Status = model.ScanStatusCancelled
@@ -150,6 +169,9 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 		return fmt.Errorf("%w: %s", ErrUnsupportedListing, run.FailureReason)
 	}
 	if run.Status == model.ScanStatusFailed {
+		if errors.Is(err, ErrNetwork) || errors.Is(err, ErrUnsupportedListing) {
+			return err
+		}
 		return fmt.Errorf("%w: %s", ErrNetwork, run.FailureReason)
 	}
 	return err
@@ -217,6 +239,7 @@ type crawlRepository struct {
 	rootFailed      bool
 	rootUnsupported bool
 	conditional     bool
+	progress        func(*model.CrawlRun)
 }
 
 func (r *crawlRepository) RequestHeaders(ctx context.Context, raw string) http.Header {
@@ -338,6 +361,11 @@ func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.D
 				r.bytes += *entry.Size
 			}
 		}
+	}
+	if r.progress != nil {
+		snapshot := *r.run
+		snapshot.Directories, snapshot.Files, snapshot.Bytes, snapshot.ErrorCount = r.directories, r.files, r.bytes, r.errors
+		r.progress(&snapshot)
 	}
 	r.mu.Unlock()
 	return nil

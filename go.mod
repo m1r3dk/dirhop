@@ -1,4 +1,4 @@
-module github.com/1jehuang/dirclone
+module github.com/m1r3dk/dirclone
 
 go 1.25.0
 

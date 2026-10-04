@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/1jehuang/dirclone/internal/config"
-	"github.com/1jehuang/dirclone/internal/downloader"
-	"github.com/1jehuang/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/config"
+	"github.com/m1r3dk/dirclone/internal/downloader"
+	"github.com/m1r3dk/dirclone/internal/model"
 )
 
 func TestPersistentIndexRefreshAndExplicitDownload(t *testing.T) {

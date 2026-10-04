@@ -19,7 +19,9 @@ import (
 var (
 	errUnsafeURL          = errors.New("parser: unsafe listing URL")
 	ErrUnsupportedListing = errors.New("unsupported directory listing")
-	sizePattern           = regexp.MustCompile(`(?i)\b([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?)(?:i?b)?\b`)
+	sizePattern           = regexp.MustCompile(`(?i)^([0-9]+(?:\.[0-9]+)?)([kmgtpe]?)(?:i?b|bytes)?$`)
+	unitPattern           = regexp.MustCompile(`(?i)^([kmgtpe]i?b?|b|bytes)$`)
+	numberPattern         = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`)
 )
 
 // Entry is one link discovered in a directory listing.
@@ -71,6 +73,9 @@ func Parsers() []DirectoryParser {
 		listingParser{name: "apache", score: scoreApache},
 		listingParser{name: "nginx", score: scoreNginx},
 		listingParser{name: "python", score: scorePython},
+		listingParser{name: "iis", score: textScore(90, "[to parent directory]", "&lt;dir&gt;", "<dir>")},
+		listingParser{name: "lighttpd", score: textScore(80, "lighttpd")},
+		listingParser{name: "caddy", score: textScore(80, "caddy")},
 		listingParser{name: "generic", score: func(document *Document) int {
 			if document != nil && hasElement(document.Root, "a") {
 				return 1
@@ -241,24 +246,112 @@ func scorePython(document *Document) int {
 }
 
 func parseMetadata(anchor *html.Node) (*int64, *time.Time) {
-	container := anchor.Parent
-	if container == nil {
-		return nil, nil
-	}
-	text := strings.TrimSpace(nodeText(container))
-	text = strings.TrimSpace(strings.TrimPrefix(text, strings.TrimSpace(nodeText(anchor))))
-	var size *int64
-	if match := sizePattern.FindStringSubmatch(text); len(match) == 3 {
-		if parsed, ok := parseSize(match[1], match[2]); ok {
-			size = &parsed
+	fields := strings.Fields(rowText(anchor))
+	modified, rest := extractTime(fields)
+	return extractSize(rest), modified
+}
+
+// rowText returns the metadata text belonging to one listing entry: the rest
+// of its table row (Apache, lighttpd, Caddy), or the text on the same line of
+// a preformatted block (nginx after the link, IIS before it).
+func rowText(anchor *html.Node) string {
+	for n := anchor.Parent; n != nil; n = n.Parent {
+		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "tr") {
+			var b strings.Builder
+			for cell := n.FirstChild; cell != nil; cell = cell.NextSibling {
+				if !containsNode(cell, anchor) {
+					b.WriteString(nodeText(cell))
+					b.WriteByte(' ')
+				}
+			}
+			return b.String()
 		}
 	}
-	for _, layout := range []string{"2006-01-02 15:04", "02-Jan-2006 15:04", "02-Jan-2006 15:04:05"} {
-		if modified, ok := findTime(text, layout); ok {
-			return size, &modified
+	var before, after string
+	for s := anchor.PrevSibling; s != nil; s = s.PrevSibling {
+		if s.Type == html.ElementNode && (strings.EqualFold(s.Data, "a") || strings.EqualFold(s.Data, "br")) {
+			break
+		}
+		text := siblingText(s)
+		if i := strings.LastIndex(text, "\n"); i >= 0 {
+			before = text[i+1:] + before
+			break
+		}
+		before = text + before
+	}
+	for s := anchor.NextSibling; s != nil; s = s.NextSibling {
+		if s.Type == html.ElementNode && (strings.EqualFold(s.Data, "a") || strings.EqualFold(s.Data, "br")) {
+			break
+		}
+		text := siblingText(s)
+		if i := strings.Index(text, "\n"); i >= 0 {
+			after += text[:i]
+			break
+		}
+		after += text
+	}
+	return before + " " + after
+}
+
+func siblingText(n *html.Node) string {
+	if n.Type == html.TextNode {
+		return n.Data
+	}
+	return nodeText(n)
+}
+
+func containsNode(root, target *html.Node) bool {
+	if root == target {
+		return true
+	}
+	for c := root.FirstChild; c != nil; c = c.NextSibling {
+		if containsNode(c, target) {
+			return true
 		}
 	}
-	return size, nil
+	return false
+}
+
+var timeLayouts = []string{
+	"2006-01-02 15:04:05", "2006-01-02 15:04", "02-Jan-2006 15:04:05", "02-Jan-2006 15:04",
+	"2006-Jan-02 15:04:05", "1/2/2006 3:04 PM", "Monday, January 2, 2006 3:04 PM",
+	"Mon, 02 Jan 2006 15:04:05 MST", time.RFC3339,
+}
+
+// extractTime finds the first timestamp spanning 1-6 consecutive fields and
+// returns the remaining fields so date digits are never mistaken for sizes.
+func extractTime(fields []string) (*time.Time, []string) {
+	for width := 6; width >= 1; width-- {
+		for start := 0; start+width <= len(fields); start++ {
+			candidate := strings.Join(fields[start:start+width], " ")
+			for _, layout := range timeLayouts {
+				if t, err := time.ParseInLocation(layout, candidate, time.Local); err == nil {
+					rest := append(append([]string{}, fields[:start]...), fields[start+width:]...)
+					return &t, rest
+				}
+			}
+		}
+	}
+	return nil, fields
+}
+
+// extractSize returns the last size-shaped field ("1.4K", "38M", "4120",
+// "1.4 KiB"). Directory markers and "-" yield nil.
+func extractSize(fields []string) *int64 {
+	for i := len(fields) - 1; i >= 0; i-- {
+		token := fields[i]
+		if i+1 < len(fields) && unitPattern.MatchString(fields[i+1]) && numberPattern.MatchString(token) {
+			token += fields[i+1]
+		}
+		m := sizePattern.FindStringSubmatch(token)
+		if m == nil {
+			continue
+		}
+		if n, ok := parseSize(m[1], m[2]); ok {
+			return &n
+		}
+	}
+	return nil
 }
 
 func parseSize(number, unit string) (int64, bool) {
@@ -274,16 +367,6 @@ func parseSize(number, unit string) (int64, bool) {
 		value *= 1024
 	}
 	return int64(value), true
-}
-
-func findTime(text, layout string) (time.Time, bool) {
-	width := len(time.Now().Format(layout))
-	for start := 0; start+width <= len(text); start++ {
-		if parsed, err := time.ParseInLocation(layout, text[start:start+width], time.Local); err == nil {
-			return parsed, true
-		}
-	}
-	return time.Time{}, false
 }
 
 func linkLooksDirectory(href, label string) bool {
@@ -373,7 +456,7 @@ func isSortQuery(raw string) bool {
 
 func isParentLabel(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
-	return name == ".." || name == "parent directory"
+	return name == ".." || name == "parent directory" || name == "[to parent directory]"
 }
 
 func attribute(node *html.Node, name string) string {

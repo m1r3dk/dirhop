@@ -15,10 +15,10 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/1jehuang/dirclone/internal/app"
-	"github.com/1jehuang/dirclone/internal/downloader"
-	"github.com/1jehuang/dirclone/internal/model"
-	"github.com/1jehuang/dirclone/internal/output"
+	"github.com/m1r3dk/dirclone/internal/app"
+	"github.com/m1r3dk/dirclone/internal/downloader"
+	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirclone/internal/output"
 )
 
 var commands = []string{"ls", "cd", "pwd", "tree", "stat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "clear", "help", "exit", "quit"}

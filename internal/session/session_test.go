@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/1jehuang/dirclone/internal/database"
+	"github.com/m1r3dk/dirclone/internal/database"
 )
 
 func TestCanonicalURL(t *testing.T) {
