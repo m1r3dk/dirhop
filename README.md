@@ -82,7 +82,14 @@ Refresh explicitly with:
 ```sh
 dirclone -s example-com refresh
 dirclone -s example-com refresh --full
+dirclone -s example-com refresh --metadata full   # adds one HEAD per file: exact size, MIME, ETag
 ```
+
+Metadata levels: `minimal`/`normal` use only what the listing shows (default); `full` additionally issues bounded HEAD requests, never GETs. Supported listing formats: Apache, nginx, Python `http.server`, IIS, lighttpd, Caddy, and generic anchor pages. Entry names come from link targets, so truncated Apache labels (`long-na..>`) are handled.
+
+`--verbose` prints one line per HTTP request (method, redacted URL, status, time). Headers, cookies, credentials, and query values are never logged.
+
+The interactive shell runs the exact same commands as the CLI, so every flag works in both (`find --size '>1GB'`, `ls -lh --sort size`). History persists across sessions; Tab completes commands, remote paths, and session names. `dirclone` with no URL reopens the active session, or offers a picker when none is active (scripts get exit code 3 instead).
 
 ## Download behavior
 

@@ -191,19 +191,57 @@ func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newScan(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "scan <url>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	metadata := a.Config.Metadata
+	cmd := &cobra.Command{Use: "scan <url>", Short: "Index a URL (full rescan if it already exists)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validMetadata(metadata); err != nil {
+			return err
+		}
 		site, created, err := a.OpenURL(cmd.Context(), args[0], opt.name, true)
 		if err != nil {
 			return err
 		}
 		if !created {
-			return a.Crawl(cmd.Context(), site, true)
+			if err := a.Crawl(cmd.Context(), site, true); err != nil {
+				return err
+			}
 		}
+		if err := enrich(cmd.Context(), a, site, metadata, opt, out); err != nil {
+			return err
+		}
+		site, _ = a.DB.SiteByID(cmd.Context(), site.ID)
 		if !opt.quiet {
 			fmt.Fprintf(out, "Indexed %s: %d files, %s\n", site.Name, site.FileCount, output.Size(site.TotalSize))
 		}
 		return nil
 	}}
+	cmd.Flags().StringVar(&metadata, "metadata", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
+	return cmd
+}
+
+func validMetadata(level string) error {
+	switch level {
+	case "minimal", "normal", "full":
+		return nil
+	}
+	return fmt.Errorf("%w: --metadata must be minimal, normal, or full", ErrInvalidArguments)
+}
+
+// enrich runs the optional HEAD pass. minimal and normal use listing data only.
+func enrich(ctx context.Context, a *app.App, site *model.Site, level string, opt *options, out io.Writer) error {
+	if level != "full" {
+		return nil
+	}
+	if !opt.quiet {
+		fmt.Fprintf(out, "Fetching full metadata for %d files (HEAD requests)...\n", site.FileCount)
+	}
+	n, err := a.EnrichMetadata(ctx, site, 0)
+	if err != nil {
+		return fmt.Errorf("%w: %v", app.ErrNetwork, err)
+	}
+	if !opt.quiet {
+		fmt.Fprintf(out, "Updated metadata for %d files\n", n)
+	}
+	return nil
 }
 
 func newConfig(a *app.App, out io.Writer) *cobra.Command {
@@ -631,12 +669,19 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newRefresh(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var full bool
+	metadata := a.Config.Metadata
 	cmd := &cobra.Command{Use: "refresh", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
 		}
+		if err := validMetadata(metadata); err != nil {
+			return err
+		}
 		if err = a.Crawl(cmd.Context(), site, full); err != nil {
+			return err
+		}
+		if err := enrich(cmd.Context(), a, site, metadata, opt, out); err != nil {
 			return err
 		}
 		site, _ = a.DB.SiteByID(cmd.Context(), site.ID)
@@ -646,6 +691,7 @@ func newRefresh(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().BoolVar(&full, "full", false, "force complete reconciliation")
+	cmd.Flags().StringVar(&metadata, "metadata", metadata, "minimal, normal, or full (adds one HEAD per file)")
 	return cmd
 }
 
