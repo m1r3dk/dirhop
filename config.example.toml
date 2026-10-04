@@ -1,0 +1,9 @@
+# dirclone configuration
+workers = 8
+download_workers = 4
+timeout = "30s"
+retries = 3
+metadata = "normal"
+download_directory = "downloads"
+color = true
+user_agent = "dirclone/1.0"
