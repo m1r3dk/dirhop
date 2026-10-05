@@ -9,7 +9,42 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/m1r3dk/dirhop/internal/bucket"
+	"github.com/m1r3dk/dirhop/internal/grayhat"
 )
+
+// The whole point of --scan is that bucket strings returned by GrayHatWarfare
+// can be crawled by dirhop. GHW returns host-only strings (and Azure containers
+// as host/container with no trailing slash); these must flow through BucketURL
+// into bucket.Detect and resolve to the right provider. This pins the exact
+// formats from the GHW v2 docs so a detection regression is caught offline.
+func TestGHWBucketFormatsAreDetectable(t *testing.T) {
+	cases := []struct {
+		raw      string
+		provider bucket.Provider
+		bucket   string
+		prefix   string
+	}{
+		{"my-logs.s3-eu-west-1.amazonaws.com", bucket.S3, "my-logs", ""},
+		{"1000bebes.s3.amazonaws.com", bucket.S3, "1000bebes", ""},
+		{"coolstuff.blob.core.windows.net/coupons", bucket.Azure, "coupons", ""},
+		{"assets.nyc3.digitaloceanspaces.com", bucket.S3, "assets", ""},
+	}
+	for _, tc := range cases {
+		url := grayhat.BucketURL(tc.raw)
+		got, ok := bucket.Detect(url)
+		if !ok || got.Provider != tc.provider || got.Bucket != tc.bucket || got.Prefix != tc.prefix {
+			t.Errorf("Detect(BucketURL(%q)=%q) = %+v ok=%v, want provider=%s bucket=%s prefix=%q",
+				tc.raw, url, got, ok, tc.provider, tc.bucket, tc.prefix)
+		}
+	}
+	// A bare Azure account with no container is not addressable and must not be
+	// mistaken for a crawlable bucket.
+	if _, ok := bucket.Detect(grayhat.BucketURL("acct.blob.core.windows.net")); ok {
+		t.Error("bare Azure account host should not be detectable as a bucket")
+	}
+}
 
 // ghw searches GrayHatWarfare and prints matches. The command must send the
 // configured API key, render results, and support --urls for piping.
