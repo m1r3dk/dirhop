@@ -69,8 +69,25 @@ example-com:/releases > exit
 
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
 
+Flags follow POSIX conventions: every option has a long `--name` form, and common ones also have a single-letter short form. Short and long forms are interchangeable, short booleans can be bundled (`ls -lah`), and `--flag=value` works everywhere.
+
+Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--quiet/-q`, `--verbose/-v`, `--no-color`, `--debug`, `--workers`.
+
+| Command | Short forms |
+| --- | --- |
+| `ls` | `--long/-l`, `--human-readable/-h`, `--all/-a`, `--reverse/-r`, `--sort` |
+| `tree` | `--depth/-L`, `--dirs-only/-d`, `--files-only/-f`, `--sizes` |
+| `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after` |
+| `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
+| `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
+| `scan` | `--file/-f`, `--metadata/-m` |
+| `refresh` | `--full/-f`, `--metadata/-m` |
+| `errors`, `downloads` | `--limit/-l` |
+| `session delete` | `--yes/-y` |
+
 ```sh
 dirhop -s mirror find --ext iso --json
+dirhop --session mirror find -e iso -j      # identical
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database
 ```

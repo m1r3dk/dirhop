@@ -61,43 +61,62 @@ func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(
 func newCommandTree(application *app.App, optp *options, stdout, stderr io.Writer) *cobra.Command {
 	opt := optp
 	cfg := application.Config
-	var err error
 	runShell := func(ctx context.Context, site *model.Site) error {
 		return shell.Run(ctx, application, site, os.Stdin, stdout, shellExec(application))
 	}
 
+	// openSessionShell starts the shell for -s NAME, else the active session,
+	// else a picker (TTY only).
+	openSessionShell := func(ctx context.Context) error {
+		site, err := application.Site(ctx, opt.session)
+		if errors.Is(err, app.ErrNoSession) && opt.session == "" {
+			site, err = pickSession(ctx, application, os.Stdin, stdout)
+		}
+		if err != nil {
+			return err
+		}
+		return runShell(ctx, site)
+	}
+
 	root := &cobra.Command{
-		Use:           "dirhop [URL]",
-		Short:         "Persistent remote filesystem for HTTP directory listings",
+		Use:   "dirhop [URL]",
+		Short: "Browse HTTP directory listings and public S3/GCS buckets like a local filesystem",
+		Long: `dirhop indexes a directory-listing website or public bucket once, stores
+its file tree locally, and lets you browse, search, and download from it
+like a filesystem - interactively or with one-shot commands.
+
+Crawling fetches directory pages only. Files are downloaded only when you
+run "download".`,
+		Example: `  dirhop https://example.com/pub/        index (first time) and open the shell
+  dirhop shell                           reopen the shell on the active session
+  dirhop -s mirror                       open the shell on session "mirror"
+  dirhop scan -f urls.txt                index many sites from a file
+  dirhop sessions                        list indexed sites
+  dirhop -s mirror find "*.iso"          search without touching the network
+  dirhop -s mirror download /pub/x.iso   download one file`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			var site *model.Site
-			if len(args) == 1 {
-				if !isHTTPURL(args[0]) {
-					return fmt.Errorf("%w: expected an HTTP/HTTPS URL", ErrInvalidArguments)
+			if len(args) == 0 {
+				if cmd.Flags().Changed("session") {
+					return openSessionShell(ctx)
 				}
-				var created bool
-				site, created, err = application.OpenURL(ctx, args[0], opt.name, true)
-				if err != nil {
-					return err
-				}
-				if !opt.quiet {
-					if created {
-						fmt.Fprintf(stdout, "Index ready: %s (%d files, %s)\n", site.Name, site.FileCount, output.Size(site.TotalSize))
-					} else {
-						fmt.Fprintf(stdout, "Existing session found: %s (%d files)\n", site.Name, site.FileCount)
-					}
-				}
-			} else {
-				site, err = application.Site(ctx, opt.session)
-				if errors.Is(err, app.ErrNoSession) && opt.session == "" {
-					site, err = pickSession(ctx, application, os.Stdin, stdout)
-				}
-				if err != nil {
-					return err
+				return cmd.Help()
+			}
+			if !isHTTPURL(args[0]) {
+				return fmt.Errorf("%w: unknown command or URL %q (run `dirhop --help`)", ErrInvalidArguments, args[0])
+			}
+			site, created, err := application.OpenURL(ctx, args[0], opt.name, true)
+			if err != nil {
+				return err
+			}
+			if !opt.quiet {
+				if created {
+					fmt.Fprintf(stdout, "Index ready: %s (%d files, %s)\n", site.Name, site.FileCount, output.Size(site.TotalSize))
+				} else {
+					fmt.Fprintf(stdout, "Existing session found: %s (%d files)\n", site.Name, site.FileCount)
 				}
 			}
 			return runShell(ctx, site)
@@ -120,11 +139,11 @@ func newCommandTree(application *app.App, optp *options, stdout, stderr io.Write
 	}
 	flags := root.PersistentFlags()
 	flags.StringVarP(&opt.session, "session", "s", opt.session, "session name or ID")
-	flags.StringVar(&opt.config, "config", cfg.Paths.ConfigFile, "configuration file")
-	flags.StringVar(&opt.url, "url", "", "select or create a session by URL for this command")
-	flags.StringVar(&opt.name, "name", "", "custom name when creating a URL session")
-	flags.BoolVar(&opt.json, "json", false, "emit JSON")
-	flags.BoolVar(&opt.quiet, "quiet", opt.quiet, "suppress non-essential output")
+	flags.StringVarP(&opt.config, "config", "c", cfg.Paths.ConfigFile, "configuration file")
+	flags.StringVarP(&opt.url, "url", "u", "", "select or create a session by URL for this command")
+	flags.StringVarP(&opt.name, "name", "n", "", "custom name when creating a URL session")
+	flags.BoolVarP(&opt.json, "json", "j", false, "emit JSON")
+	flags.BoolVarP(&opt.quiet, "quiet", "q", opt.quiet, "suppress non-essential output")
 	flags.BoolVar(&opt.noColor, "no-color", false, "disable color output")
 	flags.BoolVarP(&opt.verbose, "verbose", "v", false, "show verbose diagnostics")
 	flags.BoolVar(&opt.debug, "debug", false, "show debug diagnostics")
@@ -186,7 +205,7 @@ func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().IntVar(&limit, "limit", 100, "maximum records")
+	cmd.Flags().IntVarP(&limit, "limit", "l", 100, "maximum records")
 	return cmd
 }
 
@@ -218,7 +237,7 @@ Sites are indexed one after another; a failure does not stop the rest.`,
 			}
 			return indexURLs(cmd.Context(), a, specs, true, metadata, opt, out)
 		}}
-	cmd.Flags().StringVar(&metadata, "metadata", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
+	cmd.Flags().StringVarP(&metadata, "metadata", "m", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "read URLs from FILE, one per line (- for stdin)")
 	return cmd
 }
@@ -330,7 +349,7 @@ func newLS(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVarP(&human, "human-readable", "h", false, "human-readable sizes")
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "include hidden entries")
 	cmd.Flags().StringVar(&sortBy, "sort", "name", "sort by name, size, or date")
-	cmd.Flags().BoolVar(&reverse, "reverse", false, "reverse sort")
+	cmd.Flags().BoolVarP(&reverse, "reverse", "r", false, "reverse sort")
 	return cmd
 }
 
@@ -421,10 +440,11 @@ func newTree(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().IntVar(&depth, "depth", 0, "maximum depth")
-	cmd.Flags().BoolVar(&dirsOnly, "dirs-only", false, "show directories only")
-	cmd.Flags().BoolVar(&filesOnly, "files-only", false, "show files only")
+	cmd.Flags().IntVarP(&depth, "depth", "L", 0, "maximum depth")
+	cmd.Flags().BoolVarP(&dirsOnly, "dirs-only", "d", false, "show directories only")
+	cmd.Flags().BoolVarP(&filesOnly, "files-only", "f", false, "show files only")
 	cmd.Flags().BoolVar(&sizes, "sizes", false, "show file sizes")
+	cmd.MarkFlagsMutuallyExclusive("dirs-only", "files-only")
 	return cmd
 }
 
@@ -522,11 +542,11 @@ func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().StringVar(&regex, "regex", "", "regular expression")
-	cmd.Flags().StringVar(&ext, "ext", "", "extension or comma-separated extensions")
+	cmd.Flags().StringVarP(&regex, "regex", "r", "", "regular expression")
+	cmd.Flags().StringVarP(&ext, "ext", "e", "", "extension or comma-separated extensions")
 	cmd.Flags().StringVar(&sizeRange, "size", "", "size constraint, for example >1GB or 100MB..2GB")
 	cmd.Flags().StringVar(&modifiedAfter, "modified-after", "", "modified on or after YYYY-MM-DD")
-	cmd.Flags().StringVar(&typeName, "type", "", "file or directory")
+	cmd.Flags().StringVarP(&typeName, "type", "t", "", "file or directory")
 	return cmd
 }
 
@@ -606,11 +626,11 @@ func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().BoolVar(&filesOnly, "files-only", false, "files only")
-	cmd.Flags().BoolVar(&dirsOnly, "dirs-only", false, "directories only")
+	cmd.Flags().BoolVarP(&filesOnly, "files-only", "f", false, "files only")
+	cmd.Flags().BoolVarP(&dirsOnly, "dirs-only", "d", false, "directories only")
 	cmd.MarkFlagsMutuallyExclusive("files-only", "dirs-only")
-	cmd.Flags().StringVar(&ext, "ext", "", "filter extension")
-	cmd.Flags().StringVar(&include, "include", "", "glob or substring filter")
+	cmd.Flags().StringVarP(&ext, "ext", "e", "", "filter extension")
+	cmd.Flags().StringVarP(&include, "include", "i", "", "glob or substring filter")
 	return cmd
 }
 
@@ -655,14 +675,14 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		return err
 	}}
 	cmd.Flags().StringVarP(&destination, "output", "o", a.Config.DownloadDirectory, "destination directory")
-	cmd.Flags().IntVar(&workers, "workers", a.Config.DownloadWorkers, "download workers")
+	cmd.Flags().IntVarP(&workers, "workers", "w", a.Config.DownloadWorkers, "download workers")
 	cmd.Flags().IntVar(&segments, "segments", 1, "segments for large files")
 	cmd.Flags().BoolVar(&resume, "resume", true, "resume partial files")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace existing files")
 	cmd.Flags().BoolVar(&skip, "skip-existing", false, "skip existing files")
-	cmd.Flags().BoolVar(&all, "all", false, "download all indexed files")
-	cmd.Flags().StringVar(&include, "include", "", "include matching relative paths")
-	cmd.Flags().StringVar(&exclude, "exclude", "", "exclude matching relative paths")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "download all indexed files")
+	cmd.Flags().StringVarP(&include, "include", "i", "", "include matching relative paths")
+	cmd.Flags().StringVarP(&exclude, "exclude", "e", "", "exclude matching relative paths")
 	cmd.Flags().StringVar(&maxRate, "max-rate", "", "approximate bytes per second, for example 10MB")
 	cmd.MarkFlagsMutuallyExclusive("overwrite", "skip-existing")
 	return cmd
@@ -691,8 +711,8 @@ func newRefresh(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().BoolVar(&full, "full", false, "force complete reconciliation")
-	cmd.Flags().StringVar(&metadata, "metadata", metadata, "minimal, normal, or full (adds one HEAD per file)")
+	cmd.Flags().BoolVarP(&full, "full", "f", false, "force complete reconciliation")
+	cmd.Flags().StringVarP(&metadata, "metadata", "m", metadata, "minimal, normal, or full (adds one HEAD per file)")
 	return cmd
 }
 
@@ -729,7 +749,7 @@ func newErrors(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().IntVar(&limit, "limit", 100, "maximum errors")
+	cmd.Flags().IntVarP(&limit, "limit", "l", 100, "maximum errors")
 	return cmd
 }
 
@@ -785,7 +805,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return a.Sessions.Remove(cmd.Context(), args[0])
 	}}
-	del.Flags().BoolVar(&yes, "yes", false, "confirm permanent deletion of the local index")
+	del.Flags().BoolVarP(&yes, "yes", "y", false, "confirm permanent deletion of the local index")
 	group.AddCommand(del)
 	var full bool
 	refresh := &cobra.Command{Use: "refresh <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -795,7 +815,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return a.Crawl(cmd.Context(), s, full)
 	}}
-	refresh.Flags().BoolVar(&full, "full", false, "full reconciliation")
+	refresh.Flags().BoolVarP(&full, "full", "f", false, "full reconciliation")
 	group.AddCommand(refresh)
 	return group
 }
@@ -863,13 +883,22 @@ func isHTTPURL(s string) bool {
 	return strings.HasPrefix(strings.ToLower(s), "http://") || strings.HasPrefix(strings.ToLower(s), "https://")
 }
 
+// configArgument finds --config/-c before cobra parses, because the config
+// file decides where the index lives and must be read to build the commands.
+// It accepts every POSIX spelling: --config F, --config=F, -c F, -c=F, -cF.
 func configArgument(args []string) string {
 	for i, arg := range args {
-		if strings.HasPrefix(arg, "--config=") {
+		switch {
+		case strings.HasPrefix(arg, "--config="):
 			return strings.TrimPrefix(arg, "--config=")
-		}
-		if arg == "--config" && i+1 < len(args) {
-			return args[i+1]
+		case strings.HasPrefix(arg, "-c="):
+			return strings.TrimPrefix(arg, "-c=")
+		case arg == "--config" || arg == "-c":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		case strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--"):
+			return strings.TrimPrefix(arg, "-c")
 		}
 	}
 	return ""
