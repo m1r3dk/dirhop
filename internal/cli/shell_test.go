@@ -69,6 +69,65 @@ func TestShellDelegatesToSharedCommands(t *testing.T) {
 	}
 }
 
+// The shell `sessions` listing is numbered, and `use <n>` switches by that row
+// number so users do not have to type long generated session names. Rows are in
+// the same name order the listing prints.
+func TestShellUseByNumber(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a/":
+			fmt.Fprint(w, `<title>Index of /a</title><a href="x.zip">x.zip</a>`)
+		case "/b/":
+			fmt.Fprint(w, `<title>Index of /b</title><a href="y.zip">y.zip</a>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	cfg.Paths.Database, cfg.Paths.History = filepath.Join(tmp, "db"), filepath.Join(tmp, "h")
+	a, err := app.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ctx := context.Background()
+	if _, _, err := a.OpenURL(ctx, server.URL+"/b/", "beta", false); err != nil {
+		t.Fatal(err)
+	}
+	site, _, err := a.OpenURL(ctx, server.URL+"/a/", "alpha", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rows (name order): 1=alpha, 2=beta. Switch to 2, then back to 1, then try
+	// an out-of-range number.
+	script := strings.Join([]string{"use 2", "pwd", "use 1", "use 9", "exit"}, "\n")
+	var out bytes.Buffer
+	if err := shell.Run(ctx, a, site, strings.NewReader(script), &out, shellExec(a)); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"Session changed: beta", "beta:/ >", "Session changed: alpha", "no session #9"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in shell output:\n%s", want, got)
+		}
+	}
+	// The numbered listing must show a # column so users know the row numbers.
+	var list bytes.Buffer
+	if err := shell.Run(ctx, a, site, strings.NewReader("sessions\nexit\n"), &list, shellExec(a)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(list.String(), "#") {
+		t.Fatalf("sessions listing is not numbered:\n%s", list.String())
+	}
+}
+
 // The shell `sessions` listing must report an index size per session, matching
 // the stored total each session computed when crawled.
 func TestShellSessionsReportSize(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -137,21 +138,24 @@ func (s *state) execute(ctx context.Context, line string) (bool, error) {
 			return false, err
 		}
 		w := tabwriter.NewWriter(s.out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "\tNAME\tFILES\tSIZE\tPATH")
-		for _, site := range sites {
+		fmt.Fprintln(w, "\t#\tNAME\tFILES\tSIZE\tPATH")
+		for i, site := range sites {
 			mark := " "
 			if site.ID == s.site.ID {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", mark, site.Name, site.FileCount, output.Size(site.TotalSize), site.CWD)
+			fmt.Fprintf(w, "%s\t%d\t%s\t%d\t%s\t%s\n", mark, i+1, site.Name, site.FileCount, output.Size(site.TotalSize), site.CWD)
 		}
 		w.Flush()
 	case "use":
 		if len(args) != 2 {
-			return false, fmt.Errorf("usage: use <session>")
+			return false, fmt.Errorf("usage: use <number|name>")
 		}
-		site, err := s.app.Sessions.Use(ctx, args[1])
+		site, err := s.resolveSession(ctx, args[1])
 		if err != nil {
+			return false, err
+		}
+		if _, err := s.app.Sessions.Use(ctx, site.Name); err != nil {
 			return false, fmt.Errorf("unknown session %q", args[1])
 		}
 		s.site = site
@@ -169,6 +173,28 @@ func (s *state) execute(ctx context.Context, line string) (bool, error) {
 		return false, s.exec(ctx, s.out, s.site.Name, args)
 	}
 	return false, nil
+}
+
+// resolveSession turns a "use" argument into a site. A bare positive integer is
+// treated as a 1-based row in the "sessions" listing (name order), so users can
+// switch with "use 3" instead of typing a long generated name. Anything else is
+// passed to the normal resolver, which accepts a session name or numeric ID.
+func (s *state) resolveSession(ctx context.Context, arg string) (*model.Site, error) {
+	if n, err := strconv.Atoi(strings.TrimSpace(arg)); err == nil && n >= 1 {
+		sites, err := s.app.Sessions.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if n > len(sites) {
+			return nil, fmt.Errorf("no session #%d (there are %d; run `sessions`)", n, len(sites))
+		}
+		return &sites[n-1], nil
+	}
+	site, err := s.app.Sessions.Resolve(ctx, arg)
+	if err != nil {
+		return nil, fmt.Errorf("unknown session %q", arg)
+	}
+	return site, nil
 }
 
 const helpText = `NAVIGATION
@@ -189,11 +215,11 @@ TRANSFER
   download <path...> [--segments N] [--output DIR]
 
 SESSION
-  sessions          Show sessions
-  use <session>     Switch session (each keeps its own directory)
-  refresh [--full]  Re-index the current session
-  info              Session details
-  errors            Crawl errors
+  sessions            Show sessions (numbered)
+  use <number|name>   Switch session by row number or name
+  refresh [--full]    Re-index the current session
+  info                Session details
+  errors              Crawl errors
 
 SHELL
   clear  help  exit  (Ctrl+D exits, Tab completes, Up/Down history)
