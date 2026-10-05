@@ -12,9 +12,10 @@ import (
 	"github.com/m1r3dk/dirhop/internal/model"
 )
 
-// crawlBucket indexes an S3/GCS bucket via paginated ListObjectsV2. Keys map to
-// files; every key prefix (and every zero-byte "dir/" placeholder) maps to a
-// directory, so buckets browse like any other listing.
+// crawlBucket indexes an object-storage bucket (S3, GCS, DigitalOcean Spaces,
+// or Azure Blob) via its paginated listing API. Keys map to files; every key
+// prefix (and every zero-byte "dir/" placeholder) maps to a directory, so
+// buckets browse like any other listing.
 func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.Target, run *model.CrawlRun) error {
 	root, err := a.DB.EntryByPath(ctx, site.ID, "/", false)
 	if err != nil {

@@ -106,7 +106,14 @@ Copy `config.example.toml` to the displayed config path from `dirhop config path
 
 ## Crawling behavior
 
-Public Amazon S3 and Google Cloud Storage buckets are indexed through the documented anonymous ListObjectsV2 API (`?list-type=2`, paginated by continuation token), not HTML scraping. Recognized URLs: `https://<bucket>.s3[.<region>].amazonaws.com/`, `https://s3.amazonaws.com/<bucket>/`, `https://storage.googleapis.com/<bucket>/`, `https://<bucket>.storage.googleapis.com/`, each optionally followed by a key prefix. Key prefixes become directories; object size, ETag, and LastModified are stored. A bucket that refuses anonymous listing exits with code 7.
+Public object-storage buckets are indexed through their documented anonymous listing APIs, not HTML scraping. Amazon S3, Google Cloud Storage, and DigitalOcean Spaces (and any other S3-compatible store) use ListObjectsV2 (`?list-type=2`, paginated by continuation token); Azure Blob Storage uses List Blobs (`?restype=container&comp=list`, paginated by `marker`). Recognized URLs:
+
+- `https://<bucket>.s3[.<region>].amazonaws.com/` and `https://s3.amazonaws.com/<bucket>/`
+- `https://storage.googleapis.com/<bucket>/` and `https://<bucket>.storage.googleapis.com/`
+- `https://<bucket>.<region>.digitaloceanspaces.com/` (and the `.cdn.` alias) and `https://<region>.digitaloceanspaces.com/<bucket>/`
+- `https://<account>.blob.core.windows.net/<container>/`
+
+each optionally followed by a key prefix. Key prefixes become directories; object size, ETag, and LastModified are stored. A bucket or container that refuses anonymous listing exits with code 7.
 
 Custom domains are also supported. A CDN hostname CNAMEd to S3, GCS, R2, or MinIO (for example `https://cdn.example.com/`) matches no hostname rule, so dirhop falls back to asking the origin: if the root is not parseable HTML, it issues one `?list-type=2` request and uses the bucket path when the response is a real `ListBucketResult`. Ordinary websites are unaffected, since the probe runs only after HTML parsing has already failed.
 

@@ -81,7 +81,7 @@ func newCommandTree(application *app.App, optp *options, stdout, stderr io.Write
 
 	root := &cobra.Command{
 		Use:   "dirhop [URL]",
-		Short: "Browse HTTP directory listings and public S3/GCS buckets like a local filesystem",
+		Short: "Browse HTTP directory listings and public cloud buckets (S3, GCS, Azure, Spaces) like a local filesystem",
 		Long: `dirhop indexes a directory-listing website or public bucket once, stores
 its file tree locally, and lets you browse, search, and download from it
 like a filesystem - interactively or with one-shot commands.

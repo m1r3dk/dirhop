@@ -1,7 +1,8 @@
-// Package bucket indexes public object-storage buckets (Amazon S3 and Google
-// Cloud Storage) through their documented, unauthenticated S3-compatible
-// ListObjectsV2 XML API. Only listing requests are made; objects are never
-// fetched during indexing.
+// Package bucket indexes public object-storage buckets through their
+// documented, unauthenticated listing APIs. Amazon S3, Google Cloud Storage,
+// DigitalOcean Spaces, and any other S3-compatible store share the
+// ListObjectsV2 XML API; Azure Blob Storage uses its own List Blobs API. Only
+// listing requests are made; objects are never fetched during indexing.
 package bucket
 
 import (
@@ -21,8 +22,9 @@ import (
 type Provider string
 
 const (
-	S3  Provider = "s3"
-	GCS Provider = "gcs"
+	S3    Provider = "s3"
+	GCS   Provider = "gcs"
+	Azure Provider = "azure"
 )
 
 // Target is a bucket listing endpoint plus an optional key prefix.
@@ -52,6 +54,10 @@ func (t Target) ObjectURL(key string) string {
 //	https://s3[.-<region>].amazonaws.com/<bucket>/[prefix/]
 //	https://storage.googleapis.com/<bucket>/[prefix/]
 //	https://<bucket>.storage.googleapis.com/[prefix/]
+//	https://<bucket>.<region>.digitaloceanspaces.com/[prefix/]
+//	https://<bucket>.<region>.cdn.digitaloceanspaces.com/[prefix/]
+//	https://<region>.digitaloceanspaces.com/<bucket>/[prefix/]
+//	https://<account>.blob.core.windows.net/<container>/[prefix/]
 //
 // Other hosts return ok=false; callers may still probe the response body with
 // LooksLikeListing for S3-compatible servers on custom domains.
@@ -83,8 +89,52 @@ func Detect(raw string) (Target, bool) {
 		}
 		endpoint.Path = "/" + bucket + "/"
 		return Target{S3, bucket, normPrefix(prefix), endpoint}, true
+	case strings.HasSuffix(host, ".digitaloceanspaces.com"):
+		return detectSpaces(host, path, endpoint)
+	case strings.HasSuffix(host, ".blob.core.windows.net"):
+		return detectAzure(path, endpoint)
 	}
 	return Target{}, false
+}
+
+// detectSpaces handles DigitalOcean Spaces, which is S3-compatible. The store
+// supports both virtual-hosted (<bucket>.<region>.digitaloceanspaces.com, with
+// an optional .cdn. segment) and path-style (<region>.digitaloceanspaces.com/
+// <bucket>) addressing, so the bucket may live in the host or the first path
+// segment. The CDN alias (.cdn.) only serves objects; its listing API lives on
+// the origin host, so the endpoint drops the cdn label while object URLs are
+// still rebuilt from that same (origin) endpoint.
+func detectSpaces(host, path string, endpoint *url.URL) (Target, bool) {
+	inner := strings.TrimSuffix(host, ".digitaloceanspaces.com")
+	labels := strings.Split(inner, ".")
+	// Virtual-hosted hosts carry at least <bucket>.<region>; the CDN alias adds
+	// a "cdn" label (<bucket>.<region>.cdn). Path-style is a bare <region>.
+	if len(labels) >= 2 {
+		bucket := labels[0]
+		if bucket == "" {
+			return Target{}, false
+		}
+		endpoint.Host = strings.Replace(endpoint.Host, ".cdn.digitaloceanspaces.com", ".digitaloceanspaces.com", 1)
+		return Target{S3, bucket, normPrefix(path), endpoint}, true
+	}
+	bucket, prefix, _ := strings.Cut(path, "/")
+	if bucket == "" {
+		return Target{}, false
+	}
+	endpoint.Path = "/" + bucket + "/"
+	return Target{S3, bucket, normPrefix(prefix), endpoint}, true
+}
+
+// detectAzure handles Azure Blob Storage. The container is always the first
+// path segment under <account>.blob.core.windows.net, and the listing endpoint
+// is that container's root; everything deeper is the blob-name prefix.
+func detectAzure(path string, endpoint *url.URL) (Target, bool) {
+	container, prefix, _ := strings.Cut(path, "/")
+	if container == "" {
+		return Target{}, false
+	}
+	endpoint.Path = "/" + container + "/"
+	return Target{Azure, container, normPrefix(prefix), endpoint}, true
 }
 
 func isS3Host(host string) bool {
@@ -156,10 +206,20 @@ type Doer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// List streams every object under t.Prefix page by page (1000 keys per page),
-// so arbitrarily large buckets never sit in memory at once.
+// List streams every object under t.Prefix page by page, so arbitrarily large
+// buckets never sit in memory at once.
 func List(ctx context.Context, client Doer, t Target, userAgent string, page func([]Object) error) (pages int, err error) {
-	return listRange(ctx, client, t, task{prefix: t.Prefix}, userAgent, func(objs []Object, _ []string, _ string, _ bool) error { return page(objs) })
+	return rangeLister(t)(ctx, client, t, task{prefix: t.Prefix}, userAgent, func(objs []Object, _ []string, _ string, _ bool) error { return page(objs) })
+}
+
+// rangeLister selects the paging implementation for the target's provider. S3,
+// GCS, and DigitalOcean Spaces share the ListObjectsV2 dialect; Azure Blob has
+// its own List Blobs API.
+func rangeLister(t Target) func(context.Context, Doer, Target, task, string, func([]Object, []string, string, bool) error) (int, error) {
+	if t.Provider == Azure {
+		return listAzureRange
+	}
+	return listRange
 }
 
 // task is one listing unit: a prefix, optionally bounded to the key range
@@ -409,6 +469,11 @@ func Walk(ctx context.Context, client Doer, t Target, userAgent string, workers 
 		firstErr error
 		cond     = sync.NewCond(&mu)
 	)
+	// Azure Blob has no key-range (start-after/end) parameters, so its big flat
+	// folders cannot be split into parallel byte ranges the way S3/GCS/Spaces
+	// can; it still parallelizes across delimiter-discovered sub-prefixes.
+	listRangeFn := rangeLister(t)
+	canSplit := t.Provider != Azure
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
@@ -430,7 +495,7 @@ func Walk(ctx context.Context, client Doer, t Target, userAgent string, workers 
 				mu.Unlock()
 
 				first := true
-				n, e := listRange(ctx, client, t, tk, userAgent, func(objs []Object, dirs []string, last string, more bool) error {
+				n, e := listRangeFn(ctx, client, t, tk, userAgent, func(objs []Object, dirs []string, last string, more bool) error {
 					mu.Lock()
 					defer mu.Unlock()
 					if firstErr != nil {
@@ -440,7 +505,7 @@ func Walk(ctx context.Context, client Doer, t Target, userAgent string, workers 
 						queue = append(queue, task{prefix: d, delimiter: "/"})
 					}
 					var stopErr error
-					if first && more && tk.endAt == "" && workers > 1 {
+					if canSplit && first && more && tk.endAt == "" && workers > 1 {
 						// Big flat folder: partition the remaining key space at
 						// boundaries b1<b2<...: (last,b1], (b1,b2], ..., (bn,inf).
 						bounds := splitBounds(tk.prefix, last, workers)
