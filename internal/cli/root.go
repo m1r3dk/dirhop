@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -398,7 +399,7 @@ func newPWD(a *app.App, opt *options, out io.Writer) *cobra.Command {
 func newTree(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var depth int
 	var dirsOnly, filesOnly, sizes bool
-	cmd := &cobra.Command{Use: "tree [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "tree [path]", Short: "Display the indexed hierarchy in tree(1) format", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := exclusive(cmd, "dirs-only", "files-only"); err != nil {
 			return err
 		}
@@ -423,38 +424,153 @@ func newTree(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		if opt.json {
 			return output.JSON(out, entries)
 		}
-		fmt.Fprintln(out, displayName(*rootEntry))
-		baseDepth := strings.Count(strings.Trim(rootEntry.NormalizedPath, "/"), "/")
-		if rootEntry.NormalizedPath != "/" {
-			baseDepth++
-		}
-		for _, e := range entries {
-			if e.ID == rootEntry.ID {
-				continue
-			}
-			relDepth := strings.Count(strings.Trim(e.NormalizedPath, "/"), "/") + 1 - baseDepth
-			if depth > 0 && relDepth > depth {
-				continue
-			}
-			if dirsOnly && !e.IsDir() {
-				continue
-			}
-			if filesOnly && !e.IsFile() {
-				continue
-			}
-			name := displayName(e)
-			if sizes && e.IsFile() {
-				name = "[" + output.Size(sizeOf(e)) + "] " + name
-			}
-			fmt.Fprintf(out, "%s└── %s\n", strings.Repeat("    ", max(0, relDepth-1)), name)
-		}
-		return nil
+		return printTree(out, p, *rootEntry, entries, treeOptions{
+			depth: depth, dirsOnly: dirsOnly, filesOnly: filesOnly, sizes: sizes,
+		})
 	}}
 	cmd.Flags().IntVarP(&depth, "depth", "L", 0, "maximum depth")
 	cmd.Flags().BoolVarP(&dirsOnly, "dirs-only", "d", false, "show directories only")
 	cmd.Flags().BoolVarP(&filesOnly, "files-only", "f", false, "show files only")
-	cmd.Flags().BoolVar(&sizes, "sizes", false, "show file sizes")
+	cmd.Flags().BoolVar(&sizes, "sizes", false, "show exact file sizes in bytes")
 	return cmd
+}
+
+type treeOptions struct {
+	depth, dirs, files int
+	dirsOnly           bool
+	filesOnly          bool
+	sizes              bool
+}
+
+type treeNode struct {
+	entry    model.Entry
+	children []*treeNode
+}
+
+// printTree renders the same branch grammar as tree(1): siblings use ├──,
+// the final child uses └──, and │ is carried through every non-final ancestor.
+func printTree(out io.Writer, requestedPath string, root model.Entry, entries []model.Entry, opt treeOptions) error {
+	nodes := make(map[int64]*treeNode, len(entries))
+	for _, entry := range entries {
+		nodes[entry.ID] = &treeNode{entry: entry}
+	}
+	rootNode := nodes[root.ID]
+	if rootNode == nil {
+		rootNode = &treeNode{entry: root}
+		nodes[root.ID] = rootNode
+	}
+	for _, node := range nodes {
+		if node.entry.ID == root.ID || node.entry.ParentID == nil {
+			continue
+		}
+		if parent := nodes[*node.entry.ParentID]; parent != nil {
+			parent.children = append(parent.children, node)
+		}
+	}
+	var sortNodes func(*treeNode)
+	sortNodes = func(node *treeNode) {
+		sort.SliceStable(node.children, func(i, j int) bool {
+			a, b := node.children[i].entry.Name, node.children[j].entry.Name
+			lowerA, lowerB := strings.ToLower(a), strings.ToLower(b)
+			if lowerA == lowerB {
+				return a < b
+			}
+			return lowerA < lowerB
+		})
+		for _, child := range node.children {
+			sortNodes(child)
+		}
+	}
+	sortNodes(rootNode)
+
+	rootLabel := requestedPath
+	if rootLabel == "" {
+		rootLabel = "."
+	}
+	fmt.Fprintln(out, treeEntryLabel(rootNode.entry, rootLabel, opt.sizes))
+	if rootNode.entry.IsDir() && !opt.filesOnly {
+		opt.dirs++
+	} else if rootNode.entry.IsFile() && !opt.dirsOnly {
+		opt.files++
+	}
+
+	if opt.filesOnly {
+		var files []*treeNode
+		collectTreeFiles(rootNode, 0, opt.depth, &files)
+		for i, node := range files {
+			rel := strings.TrimPrefix(strings.TrimPrefix(node.entry.NormalizedPath, root.NormalizedPath), "/")
+			connector := "├── "
+			if i == len(files)-1 {
+				connector = "└── "
+			}
+			fmt.Fprintln(out, connector+treeEntryLabel(node.entry, rel, opt.sizes))
+			opt.files++
+		}
+	} else {
+		renderTreeChildren(out, rootNode, "", 0, &opt)
+	}
+
+	fmt.Fprintln(out)
+	switch {
+	case opt.dirsOnly:
+		fmt.Fprintf(out, "%d %s\n", opt.dirs, plural(opt.dirs, "directory", "directories"))
+	default:
+		fmt.Fprintf(out, "%d %s, %d %s\n", opt.dirs, plural(opt.dirs, "directory", "directories"), opt.files, plural(opt.files, "file", "files"))
+	}
+	return nil
+}
+
+func renderTreeChildren(out io.Writer, parent *treeNode, prefix string, parentDepth int, opt *treeOptions) {
+	if opt.depth > 0 && parentDepth >= opt.depth {
+		return
+	}
+	children := parent.children
+	if opt.dirsOnly {
+		children = slices.DeleteFunc(slices.Clone(children), func(node *treeNode) bool { return !node.entry.IsDir() })
+	}
+	for i, child := range children {
+		last := i == len(children)-1
+		connector, continuation := "├── ", "│   "
+		if last {
+			connector, continuation = "└── ", "    "
+		}
+		fmt.Fprintln(out, prefix+connector+treeEntryLabel(child.entry, child.entry.Name, opt.sizes))
+		if child.entry.IsDir() {
+			opt.dirs++
+		} else if child.entry.IsFile() {
+			opt.files++
+		}
+		renderTreeChildren(out, child, prefix+continuation, parentDepth+1, opt)
+	}
+}
+
+func collectTreeFiles(node *treeNode, depth, maxDepth int, files *[]*treeNode) {
+	for _, child := range node.children {
+		childDepth := depth + 1
+		if maxDepth > 0 && childDepth > maxDepth {
+			continue
+		}
+		if child.entry.IsFile() {
+			*files = append(*files, child)
+		}
+		if child.entry.IsDir() {
+			collectTreeFiles(child, childDepth, maxDepth, files)
+		}
+	}
+}
+
+func treeEntryLabel(entry model.Entry, name string, sizes bool) string {
+	if sizes && entry.IsFile() {
+		return fmt.Sprintf("[%11s]  %s", output.Raw(sizeOf(entry)), name)
+	}
+	return name
+}
+
+func plural(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
 }
 
 func newStat(a *app.App, opt *options, out io.Writer) *cobra.Command {
@@ -897,16 +1013,6 @@ func formatTime(t *time.Time) string {
 		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
-}
-func displayName(e model.Entry) string {
-	name := e.Name
-	if e.NormalizedPath == "/" {
-		name = "/"
-	}
-	if e.IsDir() && name != "/" {
-		name += "/"
-	}
-	return name
 }
 func isHTTPURL(s string) bool {
 	return strings.HasPrefix(strings.ToLower(s), "http://") || strings.HasPrefix(strings.ToLower(s), "https://")

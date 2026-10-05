@@ -61,6 +61,13 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 	if requests.Load() != requestCount {
 		t.Fatal("local ls unexpectedly accessed network")
 	}
+	treeJSON := run("-s", "fixture", "tree", "--json")
+	if !strings.Contains(treeJSON, `"Name": "root.zip"`) || strings.Contains(treeJSON, "directories, ") {
+		t.Fatalf("tree --json output changed from entry JSON: %q", treeJSON)
+	}
+	if requests.Load() != requestCount {
+		t.Fatal("local tree --json unexpectedly accessed network")
+	}
 	found := run("-s", "fixture", "find", "*.zip", "--json")
 	if !strings.Contains(found, "root.zip") {
 		t.Fatalf("find output: %q", found)

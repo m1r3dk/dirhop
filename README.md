@@ -62,6 +62,7 @@ example-com:/releases > exit
 ## Commands
 
 - Navigation: `ls`, `cd`, `pwd`, `tree`, `stat`, `du`
+  - `tree` uses standard `tree(1)` branches (`├──`, `└──`, `│`), alphabetical siblings, a visible directory/file summary, `-L/--depth`, `-d/--dirs-only`, `-f/--files-only`, and `--sizes`.
 - Search: `find`, `search`, `urls`
 - Transfer: `download`
 - Index: `refresh`, `errors`, `info`
