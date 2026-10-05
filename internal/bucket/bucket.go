@@ -123,11 +123,16 @@ type Object struct {
 }
 
 type listResult struct {
-	XMLName               xml.Name `xml:"ListBucketResult"`
-	Name                  string   `xml:"Name"`
-	IsTruncated           bool     `xml:"IsTruncated"`
-	NextContinuationToken string   `xml:"NextContinuationToken"`
-	CommonPrefixes        []struct {
+	XMLName xml.Name `xml:"ListBucketResult"`
+	Name    string   `xml:"Name"`
+	// KeyCount is V2-only and is how we tell the two API versions apart.
+	KeyCount              *int   `xml:"KeyCount"`
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+	// NextMarker is the V1 cursor. Servers may omit it even when truncated,
+	// in which case V1 requires resuming from the last key returned.
+	NextMarker     string `xml:"NextMarker"`
+	CommonPrefixes []struct {
 		Prefix string `xml:"Prefix"`
 	} `xml:"CommonPrefixes"`
 	Contents []struct {
@@ -168,17 +173,30 @@ type task struct {
 // errStopRange ends the task early without error.
 func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent string, page func(objs []Object, dirs []string, last string, more bool) error) (pages int, err error) {
 	token := ""
+	// V1 servers have no continuation token and page on an opaque marker
+	// instead. Detected from the first response, then used for the rest of
+	// this task so a V1-only endpoint is paged fully rather than truncated.
+	marker, v1 := "", false
 	for {
-		q := url.Values{"list-type": {"2"}, "max-keys": {"1000"}}
+		q := url.Values{"max-keys": {"1000"}}
+		if !v1 {
+			q.Set("list-type", "2")
+		}
 		if tk.prefix != "" {
 			q.Set("prefix", tk.prefix)
 		}
 		if tk.delimiter != "" {
 			q.Set("delimiter", tk.delimiter)
 		}
-		if token != "" {
+		switch {
+		case v1:
+			// V1 folds "resume here" and "start after" into one parameter.
+			if cursor := maxString(marker, tk.startAfter); cursor != "" {
+				q.Set("marker", cursor)
+			}
+		case token != "":
 			q.Set("continuation-token", token)
-		} else if tk.startAfter != "" {
+		case tk.startAfter != "":
 			q.Set("start-after", tk.startAfter)
 		}
 		u := *t.Endpoint
@@ -211,6 +229,12 @@ func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent st
 		if err := xml.Unmarshal(body, &r); err != nil {
 			return pages, fmt.Errorf("parse bucket listing: %w", err)
 		}
+		// A server that ignores list-type=2 answers V1 (no KeyCount). Switch
+		// this task to marker paging so the remaining pages are fetched
+		// instead of silently dropped.
+		if !v1 && r.KeyCount == nil && r.NextContinuationToken == "" {
+			v1 = true
+		}
 		objects := make([]Object, 0, len(r.Contents))
 		last := ""
 		stop := false
@@ -240,7 +264,24 @@ func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent st
 				last = p.Prefix
 			}
 		}
-		more := r.IsTruncated && r.NextContinuationToken != "" && !stop
+		more := r.IsTruncated && !stop
+		if v1 {
+			// NextMarker is only guaranteed when a delimiter is set; otherwise
+			// V1 says to resume from the last key of this page.
+			next := r.NextMarker
+			if next == "" {
+				next = last
+			}
+			// No way to advance means no safe way to continue: stop rather
+			// than loop forever on the same page.
+			if next == "" || next <= marker {
+				more = false
+			} else {
+				marker = next
+			}
+		} else {
+			more = more && r.NextContinuationToken != ""
+		}
 		pages++
 		if err := page(objects, prefixes, last, more); err != nil {
 			if errors.Is(err, errStopRange) {
@@ -253,6 +294,14 @@ func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent st
 		}
 		token = r.NextContinuationToken
 	}
+}
+
+// maxString returns the greater of a and b in byte order.
+func maxString(a, b string) string {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 var errStopRange = errors.New("stop range")
@@ -305,12 +354,6 @@ func Probe(ctx context.Context, client Doer, raw, userAgent string) (Target, boo
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8192))
 	if err != nil || !LooksLikeListing(response.Header.Get("Content-Type"), body) {
-		return Target{}, false
-	}
-	// Without list-type=2 support a server may ignore the parameter and return
-	// a V1 listing; List/Walk paginate on NextContinuationToken, which only V2
-	// provides, so require the V2 marker to avoid silently truncating.
-	if !strings.Contains(string(body), "<KeyCount>") {
 		return Target{}, false
 	}
 	var result listResult

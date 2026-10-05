@@ -286,9 +286,9 @@ func TestProbeDetectsS3CompatibleCustomDomains(t *testing.T) {
 		{"html website", "text/html", 200, "<html><body><h1>Hello</h1></body></html>", false, ""},
 		{"xml but not a listing", "application/xml", 200, "<rss><channel/></rss>", false, ""},
 		{"access denied", "application/xml", 403, "<Error><Code>AccessDenied</Code></Error>", false, ""},
-		// V1 listings lack KeyCount; Walk paginates on continuation tokens that
-		// only V2 returns, so accepting one would silently truncate the index.
-		{"v1 listing without KeyCount", "application/xml", 200, `<ListBucketResult><Name>b</Name><Marker></Marker><IsTruncated>true</IsTruncated></ListBucketResult>`, false, ""},
+		// V1 listings are accepted: listRange falls back to marker paging, so
+		// they are indexed in full rather than truncated.
+		{"v1 listing without KeyCount", "application/xml", 200, `<ListBucketResult><Name>b</Name><Marker></Marker><IsTruncated>true</IsTruncated></ListBucketResult>`, true, "b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,5 +331,135 @@ func TestProbeUsesPathAsKeyPrefix(t *testing.T) {
 	target, ok := Probe(context.Background(), server.Client(), server.URL+"/charting_library", "ua")
 	if !ok || target.Prefix != "charting_library/" || target.Endpoint.Path != "/" {
 		t.Fatalf("target=%+v ok=%v", target, ok)
+	}
+}
+
+// A V1-only server (no KeyCount, no continuation token) must be paged in full
+// via marker, not silently truncated after the first page.
+func TestListPaginatesV1WithNextMarker(t *testing.T) {
+	var markers []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		markers = append(markers, r.URL.Query().Get("marker"))
+		w.Header().Set("Content-Type", "application/xml")
+		switch r.URL.Query().Get("marker") {
+		case "":
+			fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>true</IsTruncated><NextMarker>k1</NextMarker><Contents><Key>k0</Key><Size>1</Size></Contents><Contents><Key>k1</Key><Size>1</Size></Contents></ListBucketResult>`)
+		case "k1":
+			fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>true</IsTruncated><NextMarker>k3</NextMarker><Contents><Key>k2</Key><Size>1</Size></Contents><Contents><Key>k3</Key><Size>1</Size></Contents></ListBucketResult>`)
+		default:
+			fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>false</IsTruncated><Contents><Key>k4</Key><Size>1</Size></Contents></ListBucketResult>`)
+		}
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(server.URL + "/")
+	var keys []string
+	pages, err := List(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua", func(objs []Object) error {
+		for _, o := range objs {
+			keys = append(keys, o.Key)
+		}
+		return nil
+	})
+	if err != nil || pages != 3 {
+		t.Fatalf("pages=%d err=%v", pages, err)
+	}
+	if got := strings.Join(keys, ","); got != "k0,k1,k2,k3,k4" {
+		t.Errorf("keys=%q, want all five (V1 listing was truncated)", got)
+	}
+	if strings.Join(markers, ",") != ",k1,k3" {
+		t.Errorf("markers=%v, want ['' k1 k3]", markers)
+	}
+}
+
+// V1 only guarantees NextMarker when a delimiter is set. Without it, paging
+// must resume from the last key of the page.
+func TestListPaginatesV1WithoutNextMarker(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("marker") == "" {
+			fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>true</IsTruncated><Contents><Key>a</Key><Size>1</Size></Contents><Contents><Key>b</Key><Size>1</Size></Contents></ListBucketResult>`)
+			return
+		}
+		if r.URL.Query().Get("marker") != "b" {
+			t.Errorf("marker=%q want b (resume from last key)", r.URL.Query().Get("marker"))
+		}
+		fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>false</IsTruncated><Contents><Key>c</Key><Size>1</Size></Contents></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(server.URL + "/")
+	var keys []string
+	if _, err := List(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua", func(objs []Object) error {
+		for _, o := range objs {
+			keys = append(keys, o.Key)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(keys, ","); got != "a,b,c" {
+		t.Errorf("keys=%q want a,b,c", got)
+	}
+}
+
+// A broken server that claims truncation but never advances must terminate
+// rather than loop forever re-fetching the same page.
+func TestListV1StopsWhenMarkerCannotAdvance(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		// Always truncated, always the same marker: a cursor that never moves.
+		fmt.Fprint(w, `<ListBucketResult><Name>b</Name><IsTruncated>true</IsTruncated><NextMarker>stuck</NextMarker><Contents><Key>stuck</Key><Size>1</Size></Contents></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(server.URL + "/")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = List(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua", func([]Object) error { return nil })
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("List looped forever on a non-advancing V1 marker")
+	}
+	if n := requests.Load(); n > 3 {
+		t.Errorf("made %d requests on a stuck cursor, want it to stop quickly", n)
+	}
+}
+
+// V2 servers must keep using continuation tokens, never the V1 marker.
+func TestListPrefersV2ContinuationToken(t *testing.T) {
+	var sawMarker bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("marker") != "" {
+			sawMarker = true
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("continuation-token") == "" {
+			fmt.Fprint(w, `<ListBucketResult><Name>b</Name><KeyCount>1</KeyCount><IsTruncated>true</IsTruncated><NextContinuationToken>tok</NextContinuationToken><Contents><Key>a</Key><Size>1</Size></Contents></ListBucketResult>`)
+			return
+		}
+		fmt.Fprint(w, `<ListBucketResult><Name>b</Name><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>b</Key><Size>1</Size></Contents></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(server.URL + "/")
+	var keys []string
+	if _, err := List(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua", func(objs []Object) error {
+		for _, o := range objs {
+			keys = append(keys, o.Key)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sawMarker {
+		t.Error("V2 server was sent a V1 marker parameter")
+	}
+	if strings.Join(keys, ",") != "a,b" {
+		t.Errorf("keys=%v", keys)
 	}
 }

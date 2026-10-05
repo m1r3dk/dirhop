@@ -108,6 +108,8 @@ Public Amazon S3 and Google Cloud Storage buckets are indexed through the docume
 
 Custom domains are also supported. A CDN hostname CNAMEd to S3, GCS, R2, or MinIO (for example `https://cdn.example.com/`) matches no hostname rule, so dirhop falls back to asking the origin: if the root is not parseable HTML, it issues one `?list-type=2` request and uses the bucket path when the response is a real `ListBucketResult`. Ordinary websites are unaffected, since the probe runs only after HTML parsing has already failed.
 
+Listing prefers the V2 API. Servers that only implement the older V1 listing (no `KeyCount`, no continuation token) are detected from the first response and paged with `marker` instead, resuming from `NextMarker` or the last key of the page, so they are indexed in full rather than truncated at 1000 objects. A server that claims more results but never advances its cursor stops instead of looping.
+
 Bucket listing is parallel. Folders (`delimiter=/` prefixes) are listed concurrently, and large flat folders are split into `start-after` key ranges so one folder with tens of thousands of objects is not a single sequential page chain. Default concurrency is 4x `crawl_concurrency` (max 32) for buckets. Override per run with `--workers N` (max 64) on `scan`/`refresh`/`open`, for both buckets and HTML listings.
 
 The crawler uses bounded concurrency, HTTP keep-alive, retries, redirect checks, same-host and base-path restrictions, duplicate prevention, and parser detection for common Apache, nginx, Python, and generic HTML listings. It follows only links present in listing pages. Normal browsing and searching query SQLite and do not make network requests.
