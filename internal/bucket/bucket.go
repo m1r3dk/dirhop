@@ -124,6 +124,7 @@ type Object struct {
 
 type listResult struct {
 	XMLName               xml.Name `xml:"ListBucketResult"`
+	Name                  string   `xml:"Name"`
 	IsTruncated           bool     `xml:"IsTruncated"`
 	NextContinuationToken string   `xml:"NextContinuationToken"`
 	CommonPrefixes        []struct {
@@ -259,6 +260,64 @@ var errStopRange = errors.New("stop range")
 // LooksLikeListing reports whether a response body is an S3-style bucket list.
 func LooksLikeListing(contentType string, body []byte) bool {
 	return strings.Contains(contentType, "xml") && strings.Contains(string(body[:min(len(body), 512)]), "<ListBucketResult")
+}
+
+// Probe asks an unrecognized host whether it is actually an S3-compatible
+// bucket endpoint. CDN domains (cdn.example.com) are routinely CNAMEd to S3,
+// GCS, R2, or MinIO, and serve the same anonymous ListObjectsV2 XML as the
+// native hostname, so hostname matching alone misses them.
+//
+// A single bounded listing request is made. The target is accepted only when
+// the body really is a <ListBucketResult>, so ordinary websites and SPA
+// index.html responses are rejected and fall through to the HTML crawler.
+func Probe(ctx context.Context, client Doer, raw, userAgent string) (Target, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return Target{}, false
+	}
+	// The bucket root is the URL root; any path becomes the key prefix.
+	endpoint := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/"}
+	target := Target{Provider: S3, Prefix: normPrefix(strings.TrimPrefix(u.Path, "/")), Endpoint: endpoint}
+
+	query := url.Values{"list-type": {"2"}, "max-keys": {"1"}}
+	if target.Prefix != "" {
+		query.Set("prefix", target.Prefix)
+	}
+	probeURL := *endpoint
+	probeURL.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL.String(), nil)
+	if err != nil {
+		return Target{}, false
+	}
+	if userAgent != "" {
+		request.Header.Set("User-Agent", userAgent)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return Target{}, false
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<16))
+		_ = response.Body.Close()
+	}()
+	if response.StatusCode != http.StatusOK {
+		return Target{}, false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8192))
+	if err != nil || !LooksLikeListing(response.Header.Get("Content-Type"), body) {
+		return Target{}, false
+	}
+	// Without list-type=2 support a server may ignore the parameter and return
+	// a V1 listing; List/Walk paginate on NextContinuationToken, which only V2
+	// provides, so require the V2 marker to avoid silently truncating.
+	if !strings.Contains(string(body), "<KeyCount>") {
+		return Target{}, false
+	}
+	var result listResult
+	if xml.Unmarshal(body, &result) == nil && result.Name != "" {
+		target.Bucket = result.Name
+	}
+	return target, true
 }
 
 // Walk lists every object under t.Prefix with a bounded worker pool.

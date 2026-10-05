@@ -267,3 +267,69 @@ func TestWalkStopsOnError(t *testing.T) {
 		t.Fatal("Walk hung after error")
 	}
 }
+
+// Custom/CDN domains CNAMEd to object storage serve the same anonymous
+// ListObjectsV2 XML but are not recognizable by hostname, so Probe asks the
+// origin. It must accept real bucket endpoints and reject ordinary websites.
+func TestProbeDetectsS3CompatibleCustomDomains(t *testing.T) {
+	const listing = `<?xml version='1.0' encoding='UTF-8'?><ListBucketResult xmlns='http://doc.s3.amazonaws.com/2006-03-01'><Name>cdn-bucket</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>true</IsTruncated><Contents><Key>a.css</Key><Size>5</Size></Contents></ListBucketResult>`
+
+	cases := []struct {
+		name        string
+		contentType string
+		status      int
+		body        string
+		wantOK      bool
+		wantBucket  string
+	}{
+		{"s3 compatible cdn", "application/xml; charset=UTF-8", 200, listing, true, "cdn-bucket"},
+		{"html website", "text/html", 200, "<html><body><h1>Hello</h1></body></html>", false, ""},
+		{"xml but not a listing", "application/xml", 200, "<rss><channel/></rss>", false, ""},
+		{"access denied", "application/xml", 403, "<Error><Code>AccessDenied</Code></Error>", false, ""},
+		// V1 listings lack KeyCount; Walk paginates on continuation tokens that
+		// only V2 returns, so accepting one would silently truncate the index.
+		{"v1 listing without KeyCount", "application/xml", 200, `<ListBucketResult><Name>b</Name><Marker></Marker><IsTruncated>true</IsTruncated></ListBucketResult>`, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.URL.RawQuery
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			target, ok := Probe(context.Background(), server.Client(), server.URL+"/", "dirhop-test")
+			if ok != tc.wantOK {
+				t.Fatalf("Probe ok=%v want %v", ok, tc.wantOK)
+			}
+			if !strings.Contains(gotQuery, "list-type=2") {
+				t.Errorf("probe did not use the V2 listing API: %q", gotQuery)
+			}
+			if ok && target.Bucket != tc.wantBucket {
+				t.Errorf("bucket=%q want %q", target.Bucket, tc.wantBucket)
+			}
+			if ok && target.Endpoint.Path != "/" {
+				t.Errorf("endpoint path=%q want /", target.Endpoint.Path)
+			}
+		})
+	}
+}
+
+func TestProbeUsesPathAsKeyPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("prefix"); got != "charting_library/" {
+			t.Errorf("prefix=%q want charting_library/", got)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<ListBucketResult><Name>b</Name><KeyCount>0</KeyCount></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	target, ok := Probe(context.Background(), server.Client(), server.URL+"/charting_library", "ua")
+	if !ok || target.Prefix != "charting_library/" || target.Endpoint.Path != "/" {
+		t.Fatalf("target=%+v ok=%v", target, ok)
+	}
+}

@@ -133,6 +133,7 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	if err := a.DB.StartCrawlRun(ctx, run); err != nil {
 		return err
 	}
+	// Native bucket hostnames are recognized by name, for free.
 	if target, ok := bucket.Detect(site.CanonicalURL); ok {
 		err := a.crawlBucket(ctx, site, target, run)
 		return a.finishRun(ctx, site, run, err, err != nil, false)
@@ -158,6 +159,16 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	rootCause := repo.rootCause
 	repo.mu.Unlock()
 	if rootFailed && err == nil && rootCause != "" {
+		// The root is not parseable HTML. Custom/CDN domains (cdn.example.com
+		// CNAMEd to S3, GCS, R2, MinIO) serve anonymous ListObjectsV2 XML that
+		// no hostname rule matches, so ask the origin before giving up. This
+		// costs one request and only on a path that was already failing.
+		if rootUnsupported {
+			if target, ok := bucket.Probe(ctx, a.HTTP, site.CanonicalURL, a.Config.UserAgent); ok {
+				bucketErr := a.crawlBucket(ctx, site, target, run)
+				return a.finishRun(ctx, site, run, bucketErr, bucketErr != nil, false)
+			}
+		}
 		err = fmt.Errorf("%w: root directory could not be indexed: %s", ErrNetwork, rootCause)
 		if rootUnsupported {
 			err = fmt.Errorf("%w: %s is not a recognizable directory listing or public bucket", ErrUnsupportedListing, site.CanonicalURL)
