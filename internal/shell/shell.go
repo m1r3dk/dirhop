@@ -9,11 +9,13 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"golang.org/x/term"
 
 	"github.com/m1r3dk/dirhop/internal/app"
 	"github.com/m1r3dk/dirhop/internal/model"
+	"github.com/m1r3dk/dirhop/internal/output"
 )
 
 // Exec runs one command line (already split) against a session using the same
@@ -134,13 +136,16 @@ func (s *state) execute(ctx context.Context, line string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		w := tabwriter.NewWriter(s.out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "\tNAME\tFILES\tSIZE\tPATH")
 		for _, site := range sites {
 			mark := " "
 			if site.ID == s.site.ID {
 				mark = "*"
 			}
-			fmt.Fprintf(s.out, "%s %-32s %8d files  %s\n", mark, site.Name, site.FileCount, site.CWD)
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", mark, site.Name, site.FileCount, output.Size(site.TotalSize), site.CWD)
 		}
+		w.Flush()
 	case "use":
 		if len(args) != 2 {
 			return false, fmt.Errorf("usage: use <session>")

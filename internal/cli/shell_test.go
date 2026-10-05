@@ -68,3 +68,49 @@ func TestShellDelegatesToSharedCommands(t *testing.T) {
 		}
 	}
 }
+
+// The shell `sessions` listing must report an index size per session, matching
+// the stored total each session computed when crawled.
+func TestShellSessionsReportSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a/":
+			fmt.Fprint(w, `<title>Index of /a</title><a href="big.iso">big.iso</a> 2.0K`)
+		case "/a/big.iso":
+			fmt.Fprint(w, "0123456789")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	cfg.Paths.Database, cfg.Paths.History = filepath.Join(tmp, "db"), filepath.Join(tmp, "h")
+	a, err := app.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ctx := context.Background()
+	site, _, err := a.OpenURL(ctx, server.URL+"/a/", "alpha", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := shell.Run(ctx, a, site, strings.NewReader("sessions\nexit\n"), &out, shellExec(a)); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	// Header column plus the session's own non-empty size (parsed "2.0K" = 2048).
+	if !strings.Contains(got, "SIZE") {
+		t.Fatalf("sessions listing missing SIZE header:\n%s", got)
+	}
+	if !strings.Contains(got, "2.0 KiB") {
+		t.Fatalf("sessions listing missing expected size for alpha:\n%s", got)
+	}
+}
