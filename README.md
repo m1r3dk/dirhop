@@ -69,7 +69,7 @@ example-com:/releases > exit
 
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
 
-Flags follow POSIX conventions: every option has a long `--name` form, and common ones also have a single-letter short form. Short and long forms are interchangeable, short booleans can be bundled (`ls -lah`), and `--flag=value` works everywhere.
+Flags follow POSIX conventions: every option has a long `--name` form, and common ones also have a single-letter short form. Short and long forms are interchangeable, short booleans can be bundled (`ls -lah`), and `--flag=value` works everywhere. Unknown flags and mutually exclusive combinations exit with code 2.
 
 Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--quiet/-q`, `--verbose/-v`, `--no-color`, `--debug`, `--workers`.
 

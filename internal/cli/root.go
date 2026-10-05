@@ -124,6 +124,10 @@ run "download".`,
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
+	// Bad flag spellings are user error, not an internal failure: exit 2.
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+	})
 	var progressDone func()
 	root.PersistentPreRun = func(*cobra.Command, []string) {
 		application.Progress, progressDone = progressPrinter(stderr, opt.quiet || opt.json)
@@ -150,6 +154,9 @@ run "download".`,
 	flags.IntVar(&application.Workers, "workers", 0, "crawl/listing concurrency for this run (default from config, max 64)")
 
 	addCommands(root, application, opt, stdout)
+	root.AddCommand(&cobra.Command{Use: "shell", Short: "Open the interactive shell on the selected or active session", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return openSessionShell(cmd.Context())
+	}})
 	root.AddCommand(&cobra.Command{Use: "open <url>", Short: "Open (or create) a URL session and start the shell", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, _, err := application.OpenURL(cmd.Context(), args[0], opt.name, true)
 		if err != nil {
@@ -392,6 +399,9 @@ func newTree(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var depth int
 	var dirsOnly, filesOnly, sizes bool
 	cmd := &cobra.Command{Use: "tree [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := exclusive(cmd, "dirs-only", "files-only"); err != nil {
+			return err
+		}
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -444,7 +454,6 @@ func newTree(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVarP(&dirsOnly, "dirs-only", "d", false, "show directories only")
 	cmd.Flags().BoolVarP(&filesOnly, "files-only", "f", false, "show files only")
 	cmd.Flags().BoolVar(&sizes, "sizes", false, "show file sizes")
-	cmd.MarkFlagsMutuallyExclusive("dirs-only", "files-only")
 	return cmd
 }
 
@@ -574,6 +583,9 @@ func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var filesOnly, dirsOnly bool
 	var ext, include string
 	cmd := &cobra.Command{Use: "urls [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := exclusive(cmd, "files-only", "dirs-only"); err != nil {
+			return err
+		}
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -628,7 +640,6 @@ func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	}}
 	cmd.Flags().BoolVarP(&filesOnly, "files-only", "f", false, "files only")
 	cmd.Flags().BoolVarP(&dirsOnly, "dirs-only", "d", false, "directories only")
-	cmd.MarkFlagsMutuallyExclusive("files-only", "dirs-only")
 	cmd.Flags().StringVarP(&ext, "ext", "e", "", "filter extension")
 	cmd.Flags().StringVarP(&include, "include", "i", "", "glob or substring filter")
 	return cmd
@@ -663,6 +674,9 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 				return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 			}
 		}
+		if err := exclusive(cmd, "overwrite", "skip-existing"); err != nil {
+			return err
+		}
 		if all {
 			args = []string{"/"}
 		}
@@ -684,7 +698,6 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	cmd.Flags().StringVarP(&include, "include", "i", "", "include matching relative paths")
 	cmd.Flags().StringVarP(&exclude, "exclude", "e", "", "exclude matching relative paths")
 	cmd.Flags().StringVar(&maxRate, "max-rate", "", "approximate bytes per second, for example 10MB")
-	cmd.MarkFlagsMutuallyExclusive("overwrite", "skip-existing")
 	return cmd
 }
 
@@ -841,6 +854,22 @@ func printSessions(ctx context.Context, a *app.App, opt *options, out io.Writer)
 			mark = "*"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", mark, s.Name, s.Hostname, s.FileCount, output.Size(s.TotalSize), formatTime(s.LastCrawledAt))
+	}
+	return nil
+}
+
+// exclusive rejects flags that cannot be combined. Cobra's own flag-group
+// check runs before RunE and surfaces as a generic error, which would exit 1;
+// doing it here keeps the message style and the exit-2 contract.
+func exclusive(cmd *cobra.Command, names ...string) error {
+	var set []string
+	for _, name := range names {
+		if cmd.Flags().Changed(name) {
+			set = append(set, "--"+name)
+		}
+	}
+	if len(set) > 1 {
+		return fmt.Errorf("%w: %s cannot be used together", ErrInvalidArguments, strings.Join(set, " and "))
 	}
 	return nil
 }

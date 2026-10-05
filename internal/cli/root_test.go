@@ -197,3 +197,95 @@ func TestConfigArgumentAcceptsPOSIXSpellings(t *testing.T) {
 		}
 	}
 }
+
+// Flag misuse is user error and must exit 2, not the generic 1.
+func TestFlagMisuseExitsWithInvalidArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pub/" {
+			fmt.Fprint(w, `<title>Index of /pub/</title><a href="a.zip">a.zip</a>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "index.db")+"\"\nhistory = \""+filepath.Join(tmp, "history")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(args ...string) error {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		return root.Execute()
+	}
+	if err := exec("--name", "ex", "scan", server.URL+"/pub/"); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-s", "ex", "ls", "-Z"},
+		{"-s", "ex", "ls", "--nope"},
+		{"-s", "ex", "tree", "-d", "-f"},
+		{"-s", "ex", "tree", "--dirs-only", "--files-only"},
+		{"-s", "ex", "urls", "-f", "-d"},
+		{"-s", "ex", "download", "--all", "--overwrite", "--skip-existing"},
+	} {
+		err := exec(args...)
+		if ExitCode(err) != 2 {
+			t.Errorf("%v: exit=%d err=%v, want exit 2", args, ExitCode(err), err)
+		}
+	}
+}
+
+// `dirhop shell` is advertised in the root help; it must exist and run.
+func TestShellSubcommandRunsOnSelectedSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pub/" {
+			fmt.Fprint(w, `<title>Index of /pub/</title><a href="a.zip">a.zip</a>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "index.db")+"\"\nhistory = \""+filepath.Join(tmp, "history")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	root, cleanup, err := newRoot(&out, &out, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.SetArgs([]string{"--name", "sh", "scan", server.URL + "/pub/"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+
+	// The root help advertises "dirhop shell"; make sure it is a real command.
+	var help bytes.Buffer
+	root, cleanup, err = newRoot(&help, &help, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var found bool
+	for _, c := range root.Commands() {
+		if c.Name() == "shell" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("root help documents `dirhop shell` but no such command is registered")
+	}
+	if !strings.Contains(root.Example, "dirhop shell") {
+		t.Fatal("expected the shell example to stay documented")
+	}
+}
