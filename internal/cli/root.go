@@ -278,7 +278,7 @@ func enrich(ctx context.Context, a *app.App, site *model.Site, level string, opt
 
 func newConfig(a *app.App, out io.Writer) *cobra.Command {
 	group := &cobra.Command{Use: "config", Short: "Show configuration information"}
-	group.AddCommand(&cobra.Command{Use: "path", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
+	group.AddCommand(&cobra.Command{Use: "path", Short: "Print the configuration file path", Args: cobra.NoArgs, Run: func(*cobra.Command, []string) {
 		fmt.Fprintln(out, a.Config.Paths.ConfigFile)
 	}})
 	return group
@@ -295,7 +295,7 @@ func selected(ctx context.Context, a *app.App, opt *options) (*model.Site, error
 func newLS(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var long, human, all, reverse bool
 	var sortBy string
-	cmd := &cobra.Command{Use: "ls [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "ls [path]", Short: "List files and directories in an indexed path", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -362,7 +362,7 @@ func newLS(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newCD(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "cd [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "cd [path]", Short: "Change the indexed working directory", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -383,7 +383,7 @@ func newCD(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newPWD(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "pwd", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "pwd", Short: "Print the indexed working directory", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -574,7 +574,7 @@ func plural(n int, singular, plural string) string {
 }
 
 func newStat(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "stat <path>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "stat <path>", Short: "Show metadata for an indexed path", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -611,7 +611,7 @@ func newCat(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newDU(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var human bool
-	cmd := &cobra.Command{Use: "du [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "du [path]", Short: "Summarize indexed disk usage for a path", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -638,7 +638,7 @@ func newDU(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var regex, ext, sizeRange, modifiedAfter, typeName string
-	cmd := &cobra.Command{Use: "find [pattern]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "find [pattern]", Short: "Find indexed paths using glob and metadata filters", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -694,7 +694,7 @@ func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newSearch(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "search <text>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "search <text>", Short: "Search indexed paths by name or path text", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -716,7 +716,7 @@ func newSearch(a *app.App, opt *options, out io.Writer) *cobra.Command {
 func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var filesOnly, dirsOnly bool
 	var ext, include string
-	cmd := &cobra.Command{Use: "urls [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "urls [path]", Short: "Print source URLs for indexed entries", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := exclusive(cmd, "files-only", "dirs-only"); err != nil {
 			return err
 		}
@@ -784,7 +784,7 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var workers, segments int
 	var resume, overwrite, skip, all bool
 	var maxRate, include, exclude string
-	cmd := &cobra.Command{Use: "download <path> [path...]", Args: func(_ *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "download <path> [path...]", Short: "Download indexed files or directories", Args: func(_ *cobra.Command, args []string) error {
 		if all && len(args) == 0 || !all && len(args) > 0 {
 			return nil
 		}
@@ -838,7 +838,7 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 func newRefresh(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var full bool
 	metadata := a.Config.Metadata
-	cmd := &cobra.Command{Use: "refresh", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "refresh", Short: "Refresh the selected session's index", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -864,7 +864,7 @@ func newRefresh(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newInfo(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "info", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "info", Short: "Show details about the selected session", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -879,7 +879,7 @@ func newInfo(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newErrors(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var limit int
-	cmd := &cobra.Command{Use: "errors", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "errors", Short: "Show crawl errors for the selected session", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -901,13 +901,13 @@ func newErrors(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newSessions(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }}
+	return &cobra.Command{Use: "sessions", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }}
 }
 
 func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	group := &cobra.Command{Use: "session", Short: "Manage persistent sessions"}
-	group.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }})
-	group.AddCommand(&cobra.Command{Use: "use <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	group.AddCommand(&cobra.Command{Use: "list", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }})
+	group.AddCommand(&cobra.Command{Use: "use <name>", Short: "Set the active session", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
 			return err
 		}
@@ -917,7 +917,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return err
 	}})
-	group.AddCommand(&cobra.Command{Use: "info [name]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	group.AddCommand(&cobra.Command{Use: "info [name]", Short: "Show details about a session", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		selector := opt.session
 		if len(args) > 0 {
 			selector = args[0]
@@ -932,7 +932,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		fmt.Fprintf(out, "%s\t%s\t%d files\t%s\n", s.Name, s.CanonicalURL, s.FileCount, output.Size(s.TotalSize))
 		return nil
 	}})
-	group.AddCommand(&cobra.Command{Use: "rename <old> <new>", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	group.AddCommand(&cobra.Command{Use: "rename <old> <new>", Short: "Rename a persistent session", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
 			return err
 		}
@@ -943,7 +943,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		return err
 	}})
 	var yes bool
-	del := &cobra.Command{Use: "delete <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	del := &cobra.Command{Use: "delete <name>", Short: "Delete a session's local index", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if !yes {
 			return fmt.Errorf("%w: session delete requires --yes", ErrInvalidArguments)
 		}
@@ -955,7 +955,7 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	del.Flags().BoolVarP(&yes, "yes", "y", false, "confirm permanent deletion of the local index")
 	group.AddCommand(del)
 	var full bool
-	refresh := &cobra.Command{Use: "refresh <name>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	refresh := &cobra.Command{Use: "refresh <name>", Short: "Refresh a named session's index", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := a.Site(cmd.Context(), args[0])
 		if err != nil {
 			return err

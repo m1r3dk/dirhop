@@ -148,6 +148,33 @@ func TestEveryFlagHasLongNameAndUniqueShorthand(t *testing.T) {
 	walk(root)
 }
 
+// Every command displayed in help must explain what it does. This walks nested
+// commands too, so newly added command groups cannot silently regress.
+func TestEveryCommandHasDescription(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	root, cleanup, err := newRoot(&out, &out, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var walk func(cmd *cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		if strings.TrimSpace(cmd.Short) == "" {
+			t.Errorf("%s has no help description", cmd.CommandPath())
+		}
+		for _, sub := range cmd.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+}
+
 // Short flags documented to users must keep working alongside their long form.
 func TestShortAndLongFlagsAreEquivalent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
