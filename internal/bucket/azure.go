@@ -18,6 +18,11 @@ import (
 // "Container"; "Blob"-level or private containers answer 403/404 and map to
 // ErrAccessDenied, same as a locked-down S3 bucket.
 
+// azureAPIVersion pins a modern, widely deployed stable REST version. Anonymous
+// requests otherwise fall back to the 2009-09-19 default, which 409s on
+// containers that hold blob types introduced after it.
+const azureAPIVersion = "2021-12-02"
+
 type azureListResult struct {
 	XMLName xml.Name `xml:"EnumerationResults"`
 	Prefix  string   `xml:"Prefix"`
@@ -64,6 +69,11 @@ func listAzureRange(ctx context.Context, client Doer, t Target, tk task, userAge
 		if userAgent != "" {
 			req.Header.Set("User-Agent", userAgent)
 		}
+		// Anonymous requests default to the 2009-09-19 API, which rejects
+		// containers holding blob types it predates with 409
+		// FeatureVersionMismatch ("type of a blob ... is unrecognized").
+		// Pinning a modern stable version lets listing enumerate every blob.
+		req.Header.Set("x-ms-version", azureAPIVersion)
 		resp, err := client.Do(req)
 		if err != nil {
 			return pages, err

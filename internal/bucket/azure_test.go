@@ -44,13 +44,19 @@ func TestDetectSpacesAndAzure(t *testing.T) {
 
 // Azure uses a different URI, XML schema, and opaque NextMarker paging than S3.
 // List must send restype=container&comp=list, follow the marker across pages,
-// and map <Blob>/<BlobPrefix> metadata correctly.
+// and map <Blob>/<BlobPrefix> metadata correctly. It must also send a modern
+// x-ms-version: anonymous requests otherwise default to the 2009 API, which
+// 409s (FeatureVersionMismatch) on containers holding newer blob types.
 func TestAzureListPaginatesWithNextMarker(t *testing.T) {
 	var markers []string
+	var sawVersion bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("restype") != "container" || q.Get("comp") != "list" {
 			t.Errorf("unexpected query %s", r.URL.RawQuery)
+		}
+		if r.Header.Get("x-ms-version") != "" {
+			sawVersion = true
 		}
 		markers = append(markers, q.Get("marker"))
 		w.Header().Set("Content-Type", "application/xml")
@@ -93,6 +99,9 @@ func TestAzureListPaginatesWithNextMarker(t *testing.T) {
 	}
 	if strings.Join(markers, ",") != ",M2" {
 		t.Errorf("markers=%v, want ['' M2]", markers)
+	}
+	if !sawVersion {
+		t.Error("x-ms-version header was not sent; Azure would 409 on modern blob types")
 	}
 }
 
