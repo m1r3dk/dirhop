@@ -192,29 +192,34 @@ func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newScan(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	metadata := a.Config.Metadata
-	cmd := &cobra.Command{Use: "scan <url>", Short: "Index a URL (full rescan if it already exists)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if err := validMetadata(metadata); err != nil {
-			return err
-		}
-		site, created, err := a.OpenURL(cmd.Context(), args[0], opt.name, true)
-		if err != nil {
-			return err
-		}
-		if !created {
-			if err := a.Crawl(cmd.Context(), site, true); err != nil {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "scan [URL...] [-f FILE]",
+		Short: "Index one or more URLs (full rescan for existing sessions)",
+		Long: `Index one or more directory listings or buckets.
+
+URLs come from arguments and/or -f FILE (one per line; "-" reads stdin).
+In the file, blank lines and # comments are ignored, and an optional second
+field names the session:
+
+  https://mirror.example.com/pub/   mirror
+  https://bucket.s3.amazonaws.com/
+  # https://skipped.example.com/
+
+Sites are indexed one after another; a failure does not stop the rest.`,
+		Example: "  dirclone scan -f urls.txt\n  dirclone scan https://a.example/ https://b.example/\n  cat urls.txt | dirclone scan -f - --json",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validMetadata(metadata); err != nil {
 				return err
 			}
-		}
-		if err := enrich(cmd.Context(), a, site, metadata, opt, out); err != nil {
-			return err
-		}
-		site, _ = a.DB.SiteByID(cmd.Context(), site.ID)
-		if !opt.quiet {
-			fmt.Fprintf(out, "Indexed %s: %d files, %s\n", site.Name, site.FileCount, output.Size(site.TotalSize))
-		}
-		return nil
-	}}
+			specs, err := collectURLs(args, file, opt.name, cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			return indexURLs(cmd.Context(), a, specs, true, metadata, opt, out)
+		}}
 	cmd.Flags().StringVar(&metadata, "metadata", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
+	cmd.Flags().StringVarP(&file, "file", "f", "", "read URLs from FILE, one per line (- for stdin)")
 	return cmd
 }
 

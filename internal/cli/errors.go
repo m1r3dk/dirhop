@@ -28,3 +28,9 @@ func ExitCode(err error) int {
 }
 
 var ErrInvalidArguments = errors.New("invalid arguments")
+
+// AlreadyReported reports whether err's message was already shown to the user.
+func AlreadyReported(err error) bool {
+	var q quietError
+	return errors.As(err, &q)
+}

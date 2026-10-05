@@ -27,6 +27,20 @@ dirclone https://example.com/
 
 Later, the same command reopens the persisted index without crawling again.
 
+Index many sites at once from a file (one URL per line, optional session name, `#` comments):
+
+```sh
+cat > urls.txt <<'EOF'
+https://mirror.example.com/pub/      mirror
+https://example-bucket.s3.amazonaws.com/
+# https://disabled.example.com/
+EOF
+dirclone scan -f urls.txt            # or: cat urls.txt | dirclone scan -f -
+dirclone scan https://a.example/ https://b.example/
+```
+
+Duplicate URLs are skipped. One failing site does not stop the others; the exit code reflects the first failure. `--json` prints a per-URL result list.
+
 ```sh
 dirclone sessions
 dirclone -s example-com ls

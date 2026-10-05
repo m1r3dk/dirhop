@@ -155,7 +155,14 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	run.ErrorCount = repo.errors
 	rootFailed := repo.rootFailed
 	rootUnsupported := repo.rootUnsupported
+	rootCause := repo.rootCause
 	repo.mu.Unlock()
+	if rootFailed && err == nil && rootCause != "" {
+		err = fmt.Errorf("%w: root directory could not be indexed: %s", ErrNetwork, rootCause)
+		if rootUnsupported {
+			err = fmt.Errorf("%w: %s is not a recognizable directory listing or public bucket", ErrUnsupportedListing, site.CanonicalURL)
+		}
+	}
 	return a.finishRun(ctx, site, run, err, rootFailed, rootUnsupported)
 }
 
@@ -188,13 +195,13 @@ func (a *App) finishRun(ctx context.Context, site *model.Site, run *model.CrawlR
 	if err := a.DB.Recount(context.WithoutCancel(ctx), site.ID); err != nil {
 		return err
 	}
+	if errors.Is(err, ErrNetwork) || errors.Is(err, ErrUnsupportedListing) || errors.Is(err, context.Canceled) {
+		return err
+	}
 	if rootUnsupported {
-		return fmt.Errorf("%w: %s", ErrUnsupportedListing, run.FailureReason)
+		return fmt.Errorf("%w: %s", ErrUnsupportedListing, site.CanonicalURL)
 	}
 	if run.Status == model.ScanStatusFailed {
-		if errors.Is(err, ErrNetwork) || errors.Is(err, ErrUnsupportedListing) {
-			return err
-		}
 		return fmt.Errorf("%w: %s", ErrNetwork, run.FailureReason)
 	}
 	return err
@@ -261,6 +268,7 @@ type crawlRepository struct {
 	errors          int64
 	rootFailed      bool
 	rootUnsupported bool
+	rootCause       string
 	conditional     bool
 	progress        func(*model.CrawlRun)
 }
@@ -327,6 +335,7 @@ func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.D
 			r.mu.Lock()
 			r.rootFailed = true
 			r.rootUnsupported = strings.Contains(outcome.Error, "unsupported directory listing")
+			r.rootCause = outcome.Error
 			r.mu.Unlock()
 		}
 		return r.recordError(ctx, outcome, errors.New(outcome.Error))
