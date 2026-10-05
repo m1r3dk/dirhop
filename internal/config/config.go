@@ -36,6 +36,14 @@ type Config struct {
 	Metadata          string
 	Color             bool
 	UserAgent         string
+	// GrayHatWarfareAPIKey authorizes the `ghw` public-bucket search. It can
+	// also come from the GRAYHATWARFARE_API_KEY environment variable, which
+	// takes precedence so a key never has to be written to disk.
+	GrayHatWarfareAPIKey string
+	// GrayHatWarfareBaseURL overrides the API root (GRAYHATWARFARE_BASE_URL).
+	// Empty means the client's documented default. Used for tests and any
+	// future self-hosted/proxied endpoint.
+	GrayHatWarfareBaseURL string
 }
 
 // DefaultPaths returns platform-native user paths without creating them.
@@ -113,6 +121,7 @@ func Load(path string) (Config, error) {
 	cfg.Paths.ConfigFile = path
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		applyEnvOverrides(&cfg)
 		return cfg, nil
 	}
 	if err != nil {
@@ -163,6 +172,10 @@ func Load(path string) (Config, error) {
 			cfg.Color, err = strconv.ParseBool(value)
 		case "user_agent":
 			cfg.UserAgent = value
+		case "grayhatwarfare_api_key":
+			cfg.GrayHatWarfareAPIKey = value
+		case "grayhatwarfare_base_url":
+			cfg.GrayHatWarfareBaseURL = value
 		default:
 			return Config{}, fmt.Errorf("config line %d: unknown key %q", n+1, key)
 		}
@@ -170,10 +183,23 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("config line %d (%s): %w", n+1, key, err)
 		}
 	}
+	// The environment wins so a key never has to be committed to disk.
+	applyEnvOverrides(&cfg)
 	if cfg.HTTPTimeout <= 0 || cfg.BusyTimeout <= 0 {
 		return Config{}, errors.New("timeouts must be positive")
 	}
 	return cfg, nil
+}
+
+// applyEnvOverrides lets environment variables override file/default values for
+// secrets, so an API key need never be written to the config file.
+func applyEnvOverrides(cfg *Config) {
+	if v := strings.TrimSpace(os.Getenv("GRAYHATWARFARE_API_KEY")); v != "" {
+		cfg.GrayHatWarfareAPIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GRAYHATWARFARE_BASE_URL")); v != "" {
+		cfg.GrayHatWarfareBaseURL = v
+	}
 }
 
 // EnsureDirs creates application-owned directories with user-only permissions.

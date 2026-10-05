@@ -23,7 +23,7 @@ import (
 // implementation as the one-shot CLI.
 type Exec func(ctx context.Context, out io.Writer, session string, args []string) error
 
-var commands = []string{"ls", "cd", "pwd", "tree", "stat", "cat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "clear", "help", "exit", "quit"}
+var commands = []string{"ls", "cd", "pwd", "tree", "stat", "cat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "ghw", "clear", "help", "exit", "quit"}
 
 // Commands whose first argument is a remote path, for completion.
 var pathCommands = map[string]bool{"ls": true, "cd": true, "tree": true, "stat": true, "cat": true, "du": true, "download": true, "urls": true}
@@ -210,6 +210,7 @@ SEARCH
   find [glob] [--ext E] [--size >1GB] [--regex R] [--modified-after DATE] [--type file|directory]
   search <text>                                 Search names and paths
   urls [--files-only|--dirs-only] [--ext E]     Print indexed URLs
+  ghw [keywords] [--files] [--type T] [--scan]  Search GrayHatWarfare public buckets
 
 TRANSFER
   download <path...> [--segments N] [--output DIR]

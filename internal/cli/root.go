@@ -189,6 +189,7 @@ func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
 	root.AddCommand(newSessions(a, opt, out), newSession(a, opt, out))
 	root.AddCommand(newConfig(a, out))
 	root.AddCommand(newDownloads(a, opt, out))
+	root.AddCommand(newGHW(a, opt, out))
 }
 
 func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {

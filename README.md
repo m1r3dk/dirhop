@@ -65,6 +65,7 @@ example-com:/releases > exit
   - `tree` uses standard `tree(1)` branches (`├──`, `└──`, `│`), alphabetical siblings, a visible directory/file summary, `-L/--depth`, `-d/--dirs-only`, `-f/--files-only`, and `--sizes`.
   - `cat <file> [file...]` fetches indexed files and streams their exact contents to stdout in argument order, without creating a local file or adding separators/newlines.
 - Search: `find`, `search`, `urls`
+- Discovery: `ghw` (search public buckets via GrayHatWarfare)
 - Transfer: `download`
 - Index: `refresh`, `errors`, `info`
 - Sessions: `sessions`, `session list|use|info|rename|delete|refresh`, shell `use`
@@ -83,6 +84,7 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 | `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
 | `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
 | `scan` | `--file/-f`, `--metadata/-m` |
+| `ghw` | `--files`, `--type/-t`, `--ext/-e`, `--limit/-l`, `--order`, `--direction`, `--full-path`, `--scan`, `--urls` |
 | `refresh` | `--full/-f`, `--metadata/-m` |
 | `errors`, `downloads` | `--limit/-l` |
 | `session delete` | `--yes/-y` |
@@ -122,6 +124,20 @@ Listing prefers the V2 API. Servers that only implement the older V1 listing (no
 Bucket listing is parallel. Folders (`delimiter=/` prefixes) are listed concurrently, and large flat folders are split into `start-after` key ranges so one folder with tens of thousands of objects is not a single sequential page chain. Default concurrency is 4x `crawl_concurrency` (max 32) for buckets. Override per run with `--workers N` (max 64) on `scan`/`refresh`/`open`, for both buckets and HTML listings.
 
 The crawler uses bounded concurrency, HTTP keep-alive, retries, redirect checks, same-host and base-path restrictions, duplicate prevention, and parser detection for common Apache, nginx, Python, and generic HTML listings. It follows only links present in listing pages. Normal browsing and searching query SQLite and do not make network requests.
+
+## Discovering buckets (GrayHatWarfare)
+
+`ghw` searches the [GrayHatWarfare](https://grayhatwarfare.com/) public-bucket index, which covers exactly the bucket types dirhop can browse (AWS S3, Azure Blob, DigitalOcean Spaces, Google Cloud). It needs an API key: set `grayhatwarfare_api_key` in the config, or export `GRAYHATWARFARE_API_KEY` (the environment wins, so the key need not be written to disk).
+
+```sh
+dirhop ghw backup                    # buckets whose name matches "backup"
+dirhop ghw --type azure company      # Azure containers only
+dirhop ghw --files --ext sql,zip dump  # files, filtered by extension
+dirhop ghw invoices --scan           # index every matched bucket into dirhop
+dirhop ghw secrets --urls | dirhop scan -f -   # pipe matches into a batch scan
+```
+
+Bucket search is the default; `--files` searches individual files. `--scan` feeds the matched bucket URLs straight into dirhop's indexer so you can immediately `ls`/`find`/`download` them, and `--urls` prints just the bucket URLs for piping into `scan -f -`. `--json` emits raw results. GrayHatWarfare only indexes buckets that are already publicly listable; dirhop itself only issues listing requests, exactly as with any other bucket. Respect the targets' terms and the law.
 
 Refresh explicitly with:
 
