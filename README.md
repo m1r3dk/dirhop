@@ -61,8 +61,9 @@ example-com:/releases > exit
 
 ## Commands
 
-- Navigation: `ls`, `cd`, `pwd`, `tree`, `stat`, `du`
+- Navigation: `ls`, `cd`, `pwd`, `tree`, `stat`, `cat`, `du`
   - `tree` uses standard `tree(1)` branches (`├──`, `└──`, `│`), alphabetical siblings, a visible directory/file summary, `-L/--depth`, `-d/--dirs-only`, `-f/--files-only`, and `--sizes`.
+  - `cat <file> [file...]` fetches indexed files and streams their exact contents to stdout in argument order, without creating a local file or adding separators/newlines.
 - Search: `find`, `search`, `urls`
 - Transfer: `download`
 - Index: `refresh`, `errors`, `info`

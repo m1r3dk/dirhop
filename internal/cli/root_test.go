@@ -24,6 +24,10 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 			fmt.Fprint(w, `<title>Index of /pub/</title><a href="docs/">docs/</a><a href="root.zip">root.zip</a>`)
 		case "/pub/docs/":
 			fmt.Fprint(w, `<title>Index</title><a href="manual.pdf">manual.pdf</a>`)
+		case "/pub/root.zip":
+			fmt.Fprint(w, "ZIP")
+		case "/pub/docs/manual.pdf":
+			fmt.Fprint(w, "MANUAL")
 		default:
 			http.NotFound(w, r)
 		}
@@ -75,6 +79,9 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 	run("-s", "fixture", "cd", "/docs", "--quiet")
 	if got := strings.TrimSpace(run("-s", "fixture", "pwd")); got != "/docs" {
 		t.Fatalf("pwd=%q", got)
+	}
+	if got := run("-s", "fixture", "cat", "/root.zip", "manual.pdf"); got != "ZIPMANUAL" {
+		t.Fatalf("cat output=%q want ZIPMANUAL", got)
 	}
 }
 
@@ -241,6 +248,8 @@ func TestFlagMisuseExitsWithInvalidArguments(t *testing.T) {
 		{"-s", "ex", "tree", "--dirs-only", "--files-only"},
 		{"-s", "ex", "urls", "-f", "-d"},
 		{"-s", "ex", "download", "--all", "--overwrite", "--skip-existing"},
+		{"-s", "ex", "cat", "--json", "a.zip"},
+		{"-s", "ex", "cat", "/"},
 	} {
 		err := exec(args...)
 		if ExitCode(err) != 2 {

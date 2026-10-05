@@ -20,10 +20,10 @@ import (
 // implementation as the one-shot CLI.
 type Exec func(ctx context.Context, out io.Writer, session string, args []string) error
 
-var commands = []string{"ls", "cd", "pwd", "tree", "stat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "clear", "help", "exit", "quit"}
+var commands = []string{"ls", "cd", "pwd", "tree", "stat", "cat", "du", "find", "search", "download", "refresh", "info", "urls", "errors", "sessions", "use", "clear", "help", "exit", "quit"}
 
 // Commands whose first argument is a remote path, for completion.
-var pathCommands = map[string]bool{"ls": true, "cd": true, "tree": true, "stat": true, "du": true, "download": true, "urls": true}
+var pathCommands = map[string]bool{"ls": true, "cd": true, "tree": true, "stat": true, "cat": true, "du": true, "download": true, "urls": true}
 
 type state struct {
 	app  *app.App
@@ -172,6 +172,7 @@ const helpText = `NAVIGATION
   pwd                                           Show current directory
   tree [--depth N] [--dirs-only] [path]         Display directory tree
   stat <path>                                   Show metadata
+  cat <file...>                                 Print remote file contents
   du [path]                                     Indexed disk usage
 
 SEARCH

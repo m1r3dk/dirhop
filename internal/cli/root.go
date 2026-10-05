@@ -182,7 +182,7 @@ func shellExec(a *app.App) shell.Exec {
 func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
 	root.AddCommand(newScan(a, opt, out))
 	root.AddCommand(newLS(a, opt, out), newCD(a, opt, out), newPWD(a, opt, out))
-	root.AddCommand(newTree(a, opt, out), newStat(a, opt, out), newDU(a, opt, out))
+	root.AddCommand(newTree(a, opt, out), newStat(a, opt, out), newCat(a, opt, out), newDU(a, opt, out))
 	root.AddCommand(newFind(a, opt, out), newSearch(a, opt, out), newURLs(a, opt, out))
 	root.AddCommand(newDownload(a, opt, out), newRefresh(a, opt, out))
 	root.AddCommand(newInfo(a, opt, out), newErrors(a, opt, out))
@@ -591,6 +591,24 @@ func newStat(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	}}
 }
 
+func newCat(a *app.App, opt *options, out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "cat <file> [file...]",
+		Short: "Print remote file contents",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opt.json {
+				return fmt.Errorf("%w: cat does not support --json", ErrInvalidArguments)
+			}
+			site, err := selected(cmd.Context(), a, opt)
+			if err != nil {
+				return err
+			}
+			return mapFSError(a.Cat(cmd.Context(), site, args, out))
+		},
+	}
+}
+
 func newDU(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var human bool
 	cmd := &cobra.Command{Use: "du [path]", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -993,6 +1011,9 @@ func exclusive(cmd *cobra.Command, names ...string) error {
 func mapFSError(err error) error {
 	if errors.Is(err, filesystem.ErrNotFound) {
 		return fmt.Errorf("%w: %v", app.ErrPathNotFound, err)
+	}
+	if errors.Is(err, filesystem.ErrNotDirectory) || errors.Is(err, filesystem.ErrNotFile) {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
 	return err
 }

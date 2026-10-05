@@ -18,6 +18,7 @@ import (
 var (
 	ErrNotFound     = errors.New("indexed path not found")
 	ErrNotDirectory = errors.New("indexed path is not a directory")
+	ErrNotFile      = errors.New("indexed path is not a file")
 )
 
 // FS is a site-scoped, SQLite-backed read-only filesystem.
