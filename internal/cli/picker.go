@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 // pickSession lists sessions and, on a TTY, asks the user to choose one. It
@@ -23,7 +23,7 @@ func pickSession(ctx context.Context, a *app.App, in *os.File, out io.Writer) (*
 		return nil, err
 	}
 	if len(sites) == 0 {
-		return nil, fmt.Errorf("%w: run `dirclone <URL>` to index a site", app.ErrNoSession)
+		return nil, fmt.Errorf("%w: run `dirhop <URL>` to index a site", app.ErrNoSession)
 	}
 	if len(sites) == 1 {
 		return a.Sessions.Use(ctx, sites[0].Name)
@@ -33,7 +33,7 @@ func pickSession(ctx context.Context, a *app.App, in *os.File, out io.Writer) (*
 		fmt.Fprintf(out, "  %d. %s  (%s, %d files)\n", i+1, s.Name, s.Hostname, s.FileCount)
 	}
 	if !term.IsTerminal(int(in.Fd())) {
-		return nil, fmt.Errorf("%w: choose one with `dirclone session use <name>` or -s", app.ErrNoSession)
+		return nil, fmt.Errorf("%w: choose one with `dirhop session use <name>` or -s", app.ErrNoSession)
 	}
 	fmt.Fprint(out, "Select session: ")
 	line, err := bufio.NewReader(in).ReadString('\n')

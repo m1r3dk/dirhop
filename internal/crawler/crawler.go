@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/parser"
+	"github.com/m1r3dk/dirhop/internal/parser"
 )
 
 const defaultMaxBodyBytes int64 = 8 << 20
@@ -107,7 +107,7 @@ func New(client HTTPDoer, repository Repository, config Config) (*Crawler, error
 		config.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	if config.UserAgent == "" {
-		config.UserAgent = "dirclone/1"
+		config.UserAgent = "dirhop/1"
 	}
 	config.BaseURL = base
 	if config.RequestHeaders == nil {

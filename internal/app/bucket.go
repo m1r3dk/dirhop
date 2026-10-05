@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/bucket"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/bucket"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 // crawlBucket indexes an S3/GCS bucket via paginated ListObjectsV2. Keys map to

@@ -12,15 +12,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/bucket"
-	"github.com/m1r3dk/dirclone/internal/config"
-	"github.com/m1r3dk/dirclone/internal/crawler"
-	"github.com/m1r3dk/dirclone/internal/database"
-	"github.com/m1r3dk/dirclone/internal/downloader"
-	"github.com/m1r3dk/dirclone/internal/filesystem"
-	"github.com/m1r3dk/dirclone/internal/httpclient"
-	"github.com/m1r3dk/dirclone/internal/model"
-	"github.com/m1r3dk/dirclone/internal/session"
+	"github.com/m1r3dk/dirhop/internal/bucket"
+	"github.com/m1r3dk/dirhop/internal/config"
+	"github.com/m1r3dk/dirhop/internal/crawler"
+	"github.com/m1r3dk/dirhop/internal/database"
+	"github.com/m1r3dk/dirhop/internal/downloader"
+	"github.com/m1r3dk/dirhop/internal/filesystem"
+	"github.com/m1r3dk/dirhop/internal/httpclient"
+	"github.com/m1r3dk/dirhop/internal/model"
+	"github.com/m1r3dk/dirhop/internal/session"
 )
 
 // App composes the persistent store, HTTP transport, sessions, virtual
@@ -93,10 +93,10 @@ func (a *App) Close() error {
 func (a *App) Site(ctx context.Context, selector string) (*model.Site, error) {
 	site, err := a.Sessions.Resolve(ctx, selector)
 	if errors.Is(err, session.ErrNoActive) {
-		return nil, fmt.Errorf("%w: no active session (use -s <name>, `dirclone session use <name>`, or `dirclone <URL>`)", ErrNoSession)
+		return nil, fmt.Errorf("%w: no active session (use -s <name>, `dirhop session use <name>`, or `dirhop <URL>`)", ErrNoSession)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: unknown session %q (see `dirclone sessions`)", ErrNoSession, selector)
+		return nil, fmt.Errorf("%w: unknown session %q (see `dirhop sessions`)", ErrNoSession, selector)
 	}
 	return site, err
 }

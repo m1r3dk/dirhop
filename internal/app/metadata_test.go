@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/m1r3dk/dirclone/internal/config"
+	"github.com/m1r3dk/dirhop/internal/config"
 )
 
 func TestEnrichMetadataUsesHeadOnly(t *testing.T) {

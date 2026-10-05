@@ -14,13 +14,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/config"
-	"github.com/m1r3dk/dirclone/internal/downloader"
-	"github.com/m1r3dk/dirclone/internal/filesystem"
-	"github.com/m1r3dk/dirclone/internal/model"
-	"github.com/m1r3dk/dirclone/internal/output"
-	"github.com/m1r3dk/dirclone/internal/shell"
+	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/config"
+	"github.com/m1r3dk/dirhop/internal/downloader"
+	"github.com/m1r3dk/dirhop/internal/filesystem"
+	"github.com/m1r3dk/dirhop/internal/model"
+	"github.com/m1r3dk/dirhop/internal/output"
+	"github.com/m1r3dk/dirhop/internal/shell"
 )
 
 type options struct {
@@ -67,7 +67,7 @@ func newCommandTree(application *app.App, optp *options, stdout, stderr io.Write
 	}
 
 	root := &cobra.Command{
-		Use:           "dirclone [URL]",
+		Use:           "dirhop [URL]",
 		Short:         "Persistent remote filesystem for HTTP directory listings",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -207,7 +207,7 @@ field names the session:
   # https://skipped.example.com/
 
 Sites are indexed one after another; a failure does not stop the rest.`,
-		Example: "  dirclone scan -f urls.txt\n  dirclone scan https://a.example/ https://b.example/\n  cat urls.txt | dirclone scan -f - --json",
+		Example: "  dirhop scan -f urls.txt\n  dirhop scan https://a.example/ https://b.example/\n  cat urls.txt | dirhop scan -f - --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validMetadata(metadata); err != nil {
 				return err

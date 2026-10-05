@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/output"
-	"github.com/m1r3dk/dirclone/internal/session"
+	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/output"
+	"github.com/m1r3dk/dirhop/internal/session"
 )
 
 // urlSpec is one batch line: a URL and an optional session name.

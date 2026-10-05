@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/m1r3dk/dirclone/internal/cli"
+	"github.com/m1r3dk/dirhop/internal/cli"
 )
 
 func main() {

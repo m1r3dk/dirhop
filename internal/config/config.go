@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const AppName = "dirclone"
+const AppName = "dirhop"
 
 // Paths contains all application-owned paths.
 type Paths struct {
@@ -57,7 +57,7 @@ func DefaultPaths() (Paths, error) {
 	cacheDir = filepath.Join(cacheDir, AppName)
 	return Paths{
 		DataDir: data, ConfigDir: configDir, CacheDir: cacheDir,
-		Database:   filepath.Join(data, "dirclone.db"),
+		Database:   filepath.Join(data, "dirhop.db"),
 		ConfigFile: filepath.Join(configDir, "config.toml"),
 		History:    filepath.Join(data, "history"),
 	}, nil
@@ -96,7 +96,7 @@ func Default() (Config, error) {
 		Paths: paths, CrawlConcurrency: 8, DownloadWorkers: 4,
 		HTTPTimeout: 30 * time.Second, BusyTimeout: 5 * time.Second,
 		Retries: 3, DownloadDirectory: "downloads", Metadata: "normal",
-		Color: true, UserAgent: "dirclone/1",
+		Color: true, UserAgent: "dirhop/1",
 	}, nil
 }
 

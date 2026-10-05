@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 func TestOpenSchemaAndLifecycle(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(filepath.Join(t.TempDir(), "dirclone.db"))
+	db, err := Open(filepath.Join(t.TempDir(), "dirhop.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

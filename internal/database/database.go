@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/model"
 	_ "modernc.org/sqlite"
 )
 
@@ -63,7 +63,7 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 func sqliteDSN(path string, busy time.Duration) string {
 	ms := busy.Milliseconds()
 	if path == ":memory:" {
-		return fmt.Sprintf("file:dirclone-memory-%d?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)", memorySequence.Add(1), ms)
+		return fmt.Sprintf("file:dirhop-memory-%d?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)", memorySequence.Add(1), ms)
 	}
 	abs, _ := filepath.Abs(path)
 	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}

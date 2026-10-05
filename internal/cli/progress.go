@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/m1r3dk/dirclone/internal/model"
-	"github.com/m1r3dk/dirclone/internal/output"
+	"github.com/m1r3dk/dirhop/internal/model"
+	"github.com/m1r3dk/dirhop/internal/output"
 )
 
 // progressPrinter renders live crawl counters on a TTY at most ~8 times a

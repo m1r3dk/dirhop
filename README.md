@@ -1,20 +1,20 @@
-# dirclone
+# dirhop
 
-`dirclone` turns an authorized HTTP/HTTPS directory-listing website into a persistent local metadata index that behaves like a remote filesystem. Crawls fetch directory pages only. File content is transferred only after an explicit `download` command.
+`dirhop` turns an authorized HTTP/HTTPS directory-listing website into a persistent local metadata index that behaves like a remote filesystem. Crawls fetch directory pages only. File content is transferred only after an explicit `download` command.
 
-> Use `dirclone` only with public directory listings or systems you are explicitly authorized to access. It does not discover unlinked paths or bypass access controls.
+> Use `dirhop` only with public directory listings or systems you are explicitly authorized to access. It does not discover unlinked paths or bypass access controls.
 
 ## Install
 
 ```sh
-go install github.com/m1r3dk/dirclone/cmd/dirclone@latest
+go install github.com/m1r3dk/dirhop/cmd/dirhop@latest
 ```
 
 Or build locally:
 
 ```sh
 make build
-./bin/dirclone --help
+./bin/dirhop --help
 ```
 
 ## Quick start
@@ -22,7 +22,7 @@ make build
 Open a listing for the first time, crawl it, and enter the interactive shell:
 
 ```sh
-dirclone https://example.com/
+dirhop https://example.com/
 ```
 
 Later, the same command reopens the persisted index without crawling again.
@@ -35,18 +35,18 @@ https://mirror.example.com/pub/      mirror
 https://example-bucket.s3.amazonaws.com/
 # https://disabled.example.com/
 EOF
-dirclone scan -f urls.txt            # or: cat urls.txt | dirclone scan -f -
-dirclone scan https://a.example/ https://b.example/
+dirhop scan -f urls.txt            # or: cat urls.txt | dirhop scan -f -
+dirhop scan https://a.example/ https://b.example/
 ```
 
 Duplicate URLs are skipped. One failing site does not stop the others; the exit code reflects the first failure. `--json` prints a per-URL result list.
 
 ```sh
-dirclone sessions
-dirclone -s example-com ls
-dirclone -s example-com find "*.zip"
-dirclone -s example-com stat /releases/file.zip
-dirclone -s example-com download /releases/file.zip
+dirhop sessions
+dirhop -s example-com ls
+dirhop -s example-com find "*.zip"
+dirhop -s example-com stat /releases/file.zip
+dirhop -s example-com download /releases/file.zip
 ```
 
 Inside the shell:
@@ -70,20 +70,20 @@ example-com:/releases > exit
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
 
 ```sh
-dirclone -s mirror find --ext iso --json
-dirclone -s mirror urls --files-only | grep ubuntu
-dirclone -s backups du /database
+dirhop -s mirror find --ext iso --json
+dirhop -s mirror urls --files-only | grep ubuntu
+dirhop -s backups du /database
 ```
 
 ## Storage and configuration
 
 The SQLite index is stored in the OS application-data directory:
 
-- Linux: `${XDG_DATA_HOME:-~/.local/share}/dirclone/dirclone.db`
-- macOS: `~/Library/Application Support/dirclone/dirclone.db`
-- Windows: `%LocalAppData%\\dirclone\\dirclone.db`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/dirhop/dirhop.db`
+- macOS: `~/Library/Application Support/dirhop/dirhop.db`
+- Windows: `%LocalAppData%\\dirhop\\dirhop.db`
 
-Copy `config.example.toml` to the displayed config path from `dirclone config path`. Command flags override configuration. The file uses flat TOML: `key = value`, quoted or bare values, `# comments`, and optional `[section]` headers. Nested tables and arrays are not used. Unknown keys are rejected so typos are caught. Aliases `workers`, `timeout`, and `retry_count` are accepted.
+Copy `config.example.toml` to the displayed config path from `dirhop config path`. Command flags override configuration. The file uses flat TOML: `key = value`, quoted or bare values, `# comments`, and optional `[section]` headers. Nested tables and arrays are not used. Unknown keys are rejected so typos are caught. Aliases `workers`, `timeout`, and `retry_count` are accepted.
 
 ## Crawling behavior
 
@@ -96,24 +96,24 @@ The crawler uses bounded concurrency, HTTP keep-alive, retries, redirect checks,
 Refresh explicitly with:
 
 ```sh
-dirclone -s example-com refresh
-dirclone -s example-com refresh --full
-dirclone -s example-com refresh --metadata full   # adds one HEAD per file: exact size, MIME, ETag
+dirhop -s example-com refresh
+dirhop -s example-com refresh --full
+dirhop -s example-com refresh --metadata full   # adds one HEAD per file: exact size, MIME, ETag
 ```
 
 Metadata levels: `minimal`/`normal` use only what the listing shows (default); `full` additionally issues bounded HEAD requests, never GETs. Supported listing formats: Apache, nginx, Python `http.server`, IIS, lighttpd, Caddy, and generic anchor pages. Entry names come from link targets, so truncated Apache labels (`long-na..>`) are handled.
 
 `--verbose` prints one line per HTTP request (method, redacted URL, status, time). Headers, cookies, credentials, and query values are never logged.
 
-The interactive shell runs the exact same commands as the CLI, so every flag works in both (`find --size '>1GB'`, `ls -lh --sort size`). History persists across sessions; Tab completes commands, remote paths, and session names. `dirclone` with no URL reopens the active session, or offers a picker when none is active (scripts get exit code 3 instead).
+The interactive shell runs the exact same commands as the CLI, so every flag works in both (`find --size '>1GB'`, `ls -lh --sort size`). History persists across sessions; Tab completes commands, remote paths, and session names. `dirhop` with no URL reopens the active session, or offers a picker when none is active (scripts get exit code 3 instead).
 
 ## Download behavior
 
 Downloads are always explicit. Files are written through `.part` files, can resume with validated range responses, verify known lengths, and atomically rename on success. Directories are expanded from the local index and downloaded with bounded workers while preserving hierarchy.
 
 ```sh
-dirclone -s example-com download /software/ --output ./downloads --workers 6
-dirclone -s example-com download /huge.iso --segments 8 --resume
+dirhop -s example-com download /software/ --output ./downloads --workers 6
+dirhop -s example-com download /huge.iso --segments 8 --resume
 ```
 
 ## Development

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/config"
-	"github.com/m1r3dk/dirclone/internal/shell"
+	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/config"
+	"github.com/m1r3dk/dirhop/internal/shell"
 )
 
 // The shell must run the same command implementations (and flags) as the CLI,

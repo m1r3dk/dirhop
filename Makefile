@@ -1,4 +1,4 @@
-BINARY := bin/dirclone
+BINARY := bin/dirhop
 
 .PHONY: all build test vet fmt clean
 
@@ -6,7 +6,7 @@ all: test build
 
 build:
 	mkdir -p bin
-	go build -trimpath -o $(BINARY) ./cmd/dirclone
+	go build -trimpath -o $(BINARY) ./cmd/dirhop
 
 test:
 	go test ./...

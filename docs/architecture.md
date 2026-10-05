@@ -1,14 +1,14 @@
-# dirclone architecture
+# dirhop architecture
 
 ## Scope and command routing
 
-`dirclone` treats an authorized HTTP directory listing as a persistent, read-only remote filesystem. Crawling retrieves directory pages and listing metadata only. File bodies are requested only by `download`.
+`dirhop` treats an authorized HTTP directory listing as a persistent, read-only remote filesystem. Crawling retrieves directory pages and listing metadata only. File bodies are requested only by `download`.
 
 The root command handles three entry forms:
 
-- `dirclone <URL>` opens the URL's session, creates and crawls it if absent, makes it active, then starts the shell.
-- `dirclone --url <URL> <command>` selects or creates that URL's session and runs one command without starting the shell.
-- `dirclone <command>` uses `--session/-s` when supplied, otherwise the active session.
+- `dirhop <URL>` opens the URL's session, creates and crawls it if absent, makes it active, then starts the shell.
+- `dirhop --url <URL> <command>` selects or creates that URL's session and runs one command without starting the shell.
+- `dirhop <command>` uses `--session/-s` when supplied, otherwise the active session.
 
 A URL maps to a stored session by its canonical URL, not its generated name. Canonicalization lowercases scheme and host, strips fragments and default ports, cleans the escaped path, ensures a directory trailing slash, and removes directory-list sorting queries. Opening the same canonical URL therefore reuses the session without crawling again.
 

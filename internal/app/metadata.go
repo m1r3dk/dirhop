@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/database"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/database"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 // EnrichMetadata issues bounded concurrent HEAD requests for indexed files and

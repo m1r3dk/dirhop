@@ -1,4 +1,4 @@
-# dirclone configuration (TOML-style key/value subset)
+# dirhop configuration (TOML-style key/value subset)
 crawl_concurrency = 8
 download_workers = 4
 http_timeout = "30s"
@@ -7,4 +7,4 @@ retries = 3
 download_directory = "downloads"
 metadata = "normal"
 color = true
-user_agent = "dirclone/1"
+user_agent = "dirhop/1"

@@ -44,7 +44,7 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 		defer cleanup()
 		root.SetArgs(args)
 		if err := root.Execute(); err != nil {
-			t.Fatalf("dirclone %v: %v; stderr=%s", args, err, stderr.String())
+			t.Fatalf("dirhop %v: %v; stderr=%s", args, err, stderr.String())
 		}
 		return stdout.String()
 	}

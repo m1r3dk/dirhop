@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/database"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/database"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 func fixture(t *testing.T) (*database.DB, *FS) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/database"
-	"github.com/m1r3dk/dirclone/internal/downloader"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/database"
+	"github.com/m1r3dk/dirhop/internal/downloader"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 // downloadState records each file's download lifecycle in the downloads table

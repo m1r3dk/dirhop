@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/m1r3dk/dirclone/internal/config"
-	"github.com/m1r3dk/dirclone/internal/downloader"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/config"
+	"github.com/m1r3dk/dirhop/internal/downloader"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 func TestPersistentIndexRefreshAndExplicitDownload(t *testing.T) {
@@ -65,7 +65,7 @@ func TestPersistentIndexRefreshAndExplicitDownload(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	cfg.Paths.DataDir, cfg.Paths.ConfigDir, cfg.Paths.CacheDir = tmp, tmp, tmp
-	cfg.Paths.Database = filepath.Join(tmp, "dirclone.db")
+	cfg.Paths.Database = filepath.Join(tmp, "dirhop.db")
 	cfg.Paths.History = filepath.Join(tmp, "history")
 	cfg.HTTPTimeout = 5 * time.Second
 

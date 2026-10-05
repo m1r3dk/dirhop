@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/m1r3dk/dirclone/internal/app"
-	"github.com/m1r3dk/dirclone/internal/model"
+	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 // Exec runs one command line (already split) against a session using the same
