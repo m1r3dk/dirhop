@@ -25,15 +25,16 @@ import (
 )
 
 type options struct {
-	session string
-	url     string
-	name    string
-	config  string
-	json    bool
-	quiet   bool
-	noColor bool
-	verbose bool
-	debug   bool
+	session  string
+	url      string
+	name     string
+	config   string
+	parallel int
+	json     bool
+	quiet    bool
+	noColor  bool
+	verbose  bool
+	debug    bool
 }
 
 func Execute() error {
@@ -251,6 +252,7 @@ Sites are indexed one after another; a failure does not stop the rest.`,
 		}}
 	cmd.Flags().StringVarP(&metadata, "metadata", "m", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "read URLs from FILE, one per line (- for stdin)")
+	cmd.Flags().IntVarP(&opt.parallel, "parallel", "p", opt.parallel, "index this many sites concurrently (default 1; useful for large bucket lists)")
 	return cmd
 }
 

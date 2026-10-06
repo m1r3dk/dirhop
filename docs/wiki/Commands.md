@@ -43,7 +43,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 
 ## Index
 
-- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m` (full rescan)
+- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p` (full rescan)
 - `refresh` - `--full/-f`, `--metadata/-m`
 - `errors`, `downloads` - `--limit/-l`
 - `info`

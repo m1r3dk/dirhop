@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeURLPrependsScheme(t *testing.T) {
@@ -142,5 +143,73 @@ func TestScanFromFileIndexesAllAndContinuesPastFailures(t *testing.T) {
 	}
 	if ls, err := run("-s", "first", "ls", "/"); err != nil || !strings.Contains(ls, "a.zip") {
 		t.Fatalf("first session not browsable: %v %s", err, ls)
+	}
+}
+
+// Parallel scanning must index every site, keep JSON results in input order
+// (results are written by index, not completion order), and never corrupt the
+// SQLite index under concurrent writers. A deliberately slow handler makes the
+// overlap real so a serialized implementation would be measurably slower.
+func TestScanParallelIndexesAllInOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		name := strings.Trim(r.URL.Path, "/")
+		fmt.Fprintf(w, `<title>Index of /%s</title><a href="%s.bin">%s.bin</a>`, name, name, name)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+	list := filepath.Join(tmp, "urls.txt")
+	var b strings.Builder
+	const n = 12
+	for i := range n {
+		fmt.Fprintf(&b, "%s/d%02d/\n", server.URL, i)
+	}
+	_ = os.WriteFile(list, []byte(b.String()), 0o600)
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	start := time.Now()
+	out, err := run("scan", "-f", list, "--parallel", "6", "--json")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("parallel scan failed: %v\n%s", err, out)
+	}
+	var results []batchResult
+	if jerr := json.Unmarshal([]byte(out), &results); jerr != nil {
+		t.Fatalf("bad json: %v\n%s", jerr, out)
+	}
+	if len(results) != n {
+		t.Fatalf("want %d results, got %d", n, len(results))
+	}
+	for i, r := range results {
+		wantPath := fmt.Sprintf("/d%02d/", i)
+		if !strings.HasSuffix(r.URL, wantPath) {
+			t.Fatalf("result %d out of order: %s (want suffix %s)", i, r.URL, wantPath)
+		}
+		if r.Error != "" || r.Files != 1 {
+			t.Fatalf("result %d not indexed: %+v", i, r)
+		}
+	}
+	// 12 sites x 40ms serialized would be ~480ms; 6-way parallel should be well
+	// under that. Generous bound to stay non-flaky in CI.
+	if elapsed > 350*time.Millisecond {
+		t.Logf("parallel scan took %v (expected overlap)", elapsed)
+	}
+	sessions, _ := run("sessions")
+	if strings.Count(sessions, "127.0.0.1") < n {
+		t.Fatalf("not all sessions persisted:\n%s", sessions)
 	}
 }

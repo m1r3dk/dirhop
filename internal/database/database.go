@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,8 +20,20 @@ import (
 var ErrNotFound = sql.ErrNoRows
 
 // DB owns a SQLite connection pool. SQLite itself coordinates processes via WAL;
-// DB deliberately has no process-wide lock.
-type DB struct{ sql *sql.DB }
+// within this process, writeMu serializes write transactions so concurrent
+// crawls (for example a parallel multi-bucket scan) never contend for the single
+// WAL writer and never surface SQLITE_BUSY. Reads are not guarded and run
+// concurrently on other pooled connections under WAL.
+type DB struct {
+	sql     *sql.DB
+	writeMu sync.Mutex
+}
+
+// lockWrite serializes a write transaction. Use as: defer d.lockWrite()().
+func (d *DB) lockWrite() func() {
+	d.writeMu.Lock()
+	return d.writeMu.Unlock
+}
 
 var memorySequence atomic.Uint64
 
@@ -102,6 +115,7 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	if site.UpdatedAt.IsZero() {
 		site.UpdatedAt = now
 	}
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -179,6 +193,7 @@ func (d *DB) ListSites(ctx context.Context) ([]model.Site, error) {
 	return out, rows.Err()
 }
 func (d *DB) SetActiveSite(ctx context.Context, id int64) error {
+	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `UPDATE app_state SET active_site_id=(SELECT id FROM sites WHERE id=?) WHERE singleton=1`, id)
 	if err != nil {
 		return err
@@ -197,10 +212,12 @@ func (d *DB) SetActiveSite(ctx context.Context, id int64) error {
 	return nil
 }
 func (d *DB) ClearActiveSite(ctx context.Context) error {
+	defer d.lockWrite()()
 	_, err := d.sql.ExecContext(ctx, `UPDATE app_state SET active_site_id=NULL WHERE singleton=1`)
 	return err
 }
 func (d *DB) SetSiteCWD(ctx context.Context, id int64, cwd string) error {
+	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `UPDATE sites SET cwd=?,updated_at=? WHERE id=?`, cwd, unix(time.Now()), id)
 	return affected(res, err)
 }
@@ -208,14 +225,17 @@ func (d *DB) RenameSite(ctx context.Context, id int64, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("empty site name")
 	}
+	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `UPDATE sites SET name=?,updated_at=? WHERE id=?`, name, unix(time.Now()), id)
 	return affected(res, err)
 }
 func (d *DB) DeleteSite(ctx context.Context, id int64) error {
+	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM sites WHERE id=?`, id)
 	return affected(res, err)
 }
 func (d *DB) SetSiteParser(ctx context.Context, id int64, parserType string) error {
+	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `UPDATE sites SET parser_type=?,updated_at=? WHERE id=?`, parserType, unix(time.Now()), id)
 	return affected(res, err)
 }
@@ -282,6 +302,7 @@ func (d *DB) Children(ctx context.Context, siteID, parentID int64) ([]model.Entr
 }
 
 func (d *DB) TouchDirectFiles(ctx context.Context, siteID, parentID int64, seen time.Time) error {
+	defer d.lockWrite()()
 	_, err := d.sql.ExecContext(ctx, `UPDATE entries SET last_seen_at=?,updated_at=? WHERE site_id=? AND parent_id=? AND type='file' AND removed=0`, unix(seen), unix(time.Now()), siteID, parentID)
 	return err
 }
@@ -426,6 +447,7 @@ func (d *DB) UpsertEntriesNoRecount(ctx context.Context, entries []model.Entry) 
 
 // Recount refreshes a site's aggregate counters.
 func (d *DB) Recount(ctx context.Context, siteID int64) error {
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -441,6 +463,7 @@ func (d *DB) upsertEntries(ctx context.Context, entries []model.Entry, recount b
 	if len(entries) == 0 {
 		return []model.Entry{}, nil
 	}
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -492,6 +515,7 @@ func recountTx(ctx context.Context, tx *sql.Tx, siteID int64) error {
 	return err
 }
 func (d *DB) MarkEntriesRemovedBefore(ctx context.Context, siteID int64, seen time.Time) error {
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -519,6 +543,7 @@ func (d *DB) StartCrawlRun(ctx context.Context, run *model.CrawlRun) error {
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now().UTC()
 	}
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -545,6 +570,7 @@ func (d *DB) FinishCrawlRun(ctx context.Context, run *model.CrawlRun) error {
 		t := time.Now().UTC()
 		run.FinishedAt = &t
 	}
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -566,6 +592,7 @@ func (d *DB) AddCrawlError(ctx context.Context, e *model.CrawlError) error {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
 	}
+	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -646,6 +673,8 @@ func (d *DB) UpsertDownload(ctx context.Context, x *model.Download) error {
 		x.CreatedAt = now
 	}
 	x.UpdatedAt = now
+	unlock := d.lockWrite()
+	defer unlock()
 	_, err := d.sql.ExecContext(ctx, `INSERT INTO downloads(site_id,entry_id,source_url,destination,status,bytes_done,total_bytes,error,created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entry_id,destination) DO UPDATE SET source_url=excluded.source_url,status=excluded.status,bytes_done=excluded.bytes_done,total_bytes=excluded.total_bytes,error=excluded.error,updated_at=excluded.updated_at,completed_at=excluded.completed_at`, x.SiteID, x.EntryID, x.SourceURL, x.Destination, x.Status, x.BytesDone, x.TotalBytes, x.Error, unix(x.CreatedAt), unix(x.UpdatedAt), nullableTime(x.CompletedAt))
 	if err != nil {
 		return err

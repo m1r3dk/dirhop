@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/m1r3dk/dirhop/internal/app"
 	"github.com/m1r3dk/dirhop/internal/output"
@@ -110,19 +112,27 @@ type batchResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// indexURLs indexes each URL in turn (each crawl is itself concurrent). One
-// failing site does not stop the rest. With rescan, existing sessions are
-// fully re-crawled (scan semantics); otherwise they are reused untouched
-// (open semantics). The active session only changes for a single URL.
+// indexURLs indexes each URL (each crawl is itself concurrent). One failing
+// site does not stop the rest. With rescan, existing sessions are fully
+// re-crawled (scan semantics); otherwise they are reused untouched (open
+// semantics). The active session only changes for a single URL.
+//
+// opt.parallel sites are indexed at once. This is the difference between
+// indexing a 30k-bucket list in minutes versus days: most of a single bucket's
+// wall-clock time is network latency (and dead hosts time out), so overlapping
+// many buckets keeps the pipeline full. SQLite writes stay safe because the
+// database serializes write transactions internally.
 func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, metadata string, opt *options, out io.Writer) error {
-	results := make([]batchResult, 0, len(specs))
-	var firstErr error
-	for i, spec := range specs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	results := make([]batchResult, len(specs))
+	errs := make([]error, len(specs))
+	single := len(specs) == 1
+
+	// indexOne runs the full open/crawl/enrich pipeline for one spec and returns
+	// its result plus the typed error (kept so exit codes stay meaningful). It
+	// never changes the active session during a batch.
+	indexOne := func(spec urlSpec) (batchResult, error) {
 		res := batchResult{URL: spec.URL}
-		site, created, err := a.OpenURL(ctx, spec.URL, spec.Name, len(specs) == 1)
+		site, created, err := a.OpenURL(ctx, spec.URL, spec.Name, single)
 		if err == nil && !created && rescan {
 			err = a.Crawl(ctx, site, true)
 		}
@@ -138,30 +148,83 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		res.Created = created
 		if err != nil {
 			res.Error = err.Error()
-			if firstErr == nil {
-				firstErr = err
-			}
 		}
-		results = append(results, res)
-		if !opt.quiet && !opt.json {
-			prefix := ""
-			if len(specs) > 1 {
-				prefix = fmt.Sprintf("[%d/%d] ", i+1, len(specs))
-			}
-			switch {
-			case err != nil:
-				fmt.Fprintf(out, "%sFAILED %s: %v\n", prefix, spec.URL, err)
-			case !created && !rescan:
-				fmt.Fprintf(out, "%sExisting %s: %d files, %s (use `scan` to re-crawl)\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
-			default:
-				fmt.Fprintf(out, "%sIndexed %s: %d files, %s\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
-			}
+		return res, err
+	}
+
+	workers := opt.parallel
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(specs) {
+		workers = len(specs)
+	}
+
+	var printMu sync.Mutex
+	var done atomic.Int64
+	report := func(i int, spec urlSpec, res batchResult) {
+		if opt.quiet || opt.json {
+			return
+		}
+		printMu.Lock()
+		defer printMu.Unlock()
+		prefix := ""
+		if len(specs) > 1 {
+			// With concurrency, finish order is not input order, so count
+			// completions rather than labeling with the input index.
+			prefix = fmt.Sprintf("[%d/%d] ", done.Add(1), len(specs))
+		}
+		switch {
+		case res.Error != "":
+			fmt.Fprintf(out, "%sFAILED %s: %s\n", prefix, spec.URL, res.Error)
+		case !res.Created && !rescan:
+			fmt.Fprintf(out, "%sExisting %s: %d files, %s (use `scan` to re-crawl)\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
+		default:
+			fmt.Fprintf(out, "%sIndexed %s: %d files, %s\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
 		}
 	}
+
+	if workers == 1 {
+		for i, spec := range specs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			results[i], errs[i] = indexOne(spec)
+			report(i, spec, results[i])
+		}
+	} else {
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					if err := ctx.Err(); err != nil {
+						results[i] = batchResult{URL: specs[i].URL, Error: err.Error()}
+						errs[i] = err
+						continue
+					}
+					results[i], errs[i] = indexOne(specs[i])
+					report(i, specs[i], results[i])
+				}
+			}()
+		}
+		for i := range specs {
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+	}
+
+	var firstErr error
 	failed := 0
-	for _, r := range results {
+	for i, r := range results {
 		if r.Error != "" {
 			failed++
+			if firstErr == nil {
+				firstErr = errs[i]
+			}
 		}
 	}
 	if opt.json {
