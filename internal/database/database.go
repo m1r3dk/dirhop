@@ -57,8 +57,11 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	sqldb.SetMaxOpenConns(8)
-	sqldb.SetMaxIdleConns(8)
+	// SQLite has one writer across all processes. Keep one connection per dirhop
+	// process so database/sql does not create intra-process lock contention, then
+	// rely on WAL + busy_timeout for cross-process writers to take turns.
+	sqldb.SetMaxOpenConns(1)
+	sqldb.SetMaxIdleConns(1)
 	db := &DB{sql: sqldb}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -460,6 +463,60 @@ func (d *DB) DiskUsage(ctx context.Context, siteID int64, root string) (model.Di
 	err := d.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(type='file'),0), COALESCE(SUM(type='directory'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE `+where, args...).Scan(&du.Files, &du.Directories, &du.Bytes)
 	return du, err
 }
+
+// IndexStats summarizes the complete local index across all sessions.
+func (d *DB) IndexStats(ctx context.Context) (model.IndexStats, error) {
+	var stats model.IndexStats
+	err := d.sql.QueryRowContext(ctx, `SELECT
+		COUNT(*),
+		COALESCE(SUM(scan_status='complete'),0),
+		COALESCE(SUM(scan_status='failed'),0),
+		COALESCE(SUM(scan_status='running'),0),
+		COALESCE(SUM(scan_status='pending'),0),
+		COALESCE(SUM(scan_status='cancelled'),0),
+		COALESCE(SUM(file_count),0),
+		COALESCE(SUM(directory_count),0),
+		COALESCE(SUM(total_size),0)
+		FROM sites`).Scan(&stats.Sites, &stats.CompleteSites, &stats.FailedSites, &stats.RunningSites, &stats.PendingSites, &stats.CancelledSites, &stats.Files, &stats.Directories, &stats.Bytes)
+	if err != nil {
+		return stats, err
+	}
+	err = d.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(type='file'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE removed=1`).Scan(&stats.RemovedFiles, &stats.RemovedBytes)
+	if err != nil {
+		return stats, err
+	}
+
+	typeRows, err := d.sql.QueryContext(ctx, `SELECT type, COUNT(*), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE removed=0 AND normalized_path<>'/' GROUP BY type ORDER BY COUNT(*) DESC, type`)
+	if err != nil {
+		return stats, err
+	}
+	defer typeRows.Close()
+	for typeRows.Next() {
+		var row model.TypeStat
+		if err := typeRows.Scan(&row.Type, &row.Count, &row.Bytes); err != nil {
+			return stats, err
+		}
+		stats.Types = append(stats.Types, row)
+	}
+	if err := typeRows.Err(); err != nil {
+		return stats, err
+	}
+
+	extRows, err := d.sql.QueryContext(ctx, `SELECT CASE WHEN extension='' THEN '(none)' ELSE extension END AS ext, COUNT(*), COALESCE(SUM(size),0) FROM entries WHERE removed=0 AND type='file' GROUP BY ext ORDER BY COUNT(*) DESC, ext COLLATE NOCASE`)
+	if err != nil {
+		return stats, err
+	}
+	defer extRows.Close()
+	for extRows.Next() {
+		var row model.ExtensionStat
+		if err := extRows.Scan(&row.Extension, &row.Count, &row.Bytes); err != nil {
+			return stats, err
+		}
+		stats.Extensions = append(stats.Extensions, row)
+	}
+	return stats, extRows.Err()
+}
+
 func scanEntryRows(rows *sql.Rows) ([]model.Entry, error) {
 	var out []model.Entry
 	for rows.Next() {

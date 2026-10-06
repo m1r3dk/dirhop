@@ -50,6 +50,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 - `refresh` - `--full/-f`, `--metadata/-m`
 - `errors`, `downloads` - `--limit/-l`
 - `changes` - `--limit/-l` (files removed since the last successful scan)
+- `stats` - `--top N` (total storage, file counts, and extension breakdowns)
 - `info`
 
 ## Sessions
@@ -67,6 +68,7 @@ dirhop scan -f buckets.txt --preflight --parallel 0
 dirhop -s mirror find --ext iso --json
 dirhop find --all-sites --ext zip
 dirhop search --all-sites secrets
+dirhop stats --top 20
 dirhop download --all-sites --include '*secrets*' -o ./matches
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database

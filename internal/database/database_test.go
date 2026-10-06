@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +103,62 @@ func TestOpenSchemaAndLifecycle(t *testing.T) {
 	}
 	if _, err = db.EntryByPath(ctx, s.ID, "/docs/readme.txt", false); err == nil {
 		t.Fatal("entry should be removed")
+	}
+}
+
+func TestConcurrentHandlesWaitForWriter(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+	db1, err := OpenWithTimeout(path, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db1.Close()
+	db2, err := OpenWithTimeout(path, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+
+	site := &model.Site{Name: "example", OriginalURL: "https://example.com/", CanonicalURL: "https://example.com/", Hostname: "example.com"}
+	if err = db1.CreateSite(ctx, site); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db1.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sites SET updated_at=? WHERE id=?`, unix(time.Now()), site.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	var started atomic.Bool
+	go func() {
+		started.Store(true)
+		done <- db2.SetSiteCWD(ctx, site.ID, "/other")
+	}()
+	for !started.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second handle did not wait for writer: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second handle stayed blocked after writer committed")
+	}
+	site, err = db1.SiteByID(ctx, site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if site.CWD != "/other" {
+		t.Fatalf("cwd=%q", site.CWD)
 	}
 }
 

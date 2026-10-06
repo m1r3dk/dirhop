@@ -193,7 +193,7 @@ func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
 	root.AddCommand(newTree(a, opt, out), newStat(a, opt, out), newCat(a, opt, out), newDU(a, opt, out))
 	root.AddCommand(newFind(a, opt, out), newSearch(a, opt, out), newURLs(a, opt, out))
 	root.AddCommand(newDownload(a, opt, out), newRefresh(a, opt, out))
-	root.AddCommand(newInfo(a, opt, out), newErrors(a, opt, out))
+	root.AddCommand(newInfo(a, opt, out), newStats(a, opt, out), newErrors(a, opt, out))
 	root.AddCommand(newChanges(a, opt, out))
 	root.AddCommand(newSessions(a, opt, out), newSession(a, opt, out))
 	root.AddCommand(newConfig(a, out))
@@ -224,6 +224,50 @@ func newDownloads(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		return nil
 	}}
 	cmd.Flags().IntVarP(&limit, "limit", "l", 100, "maximum records")
+	return cmd
+}
+
+func newStats(a *app.App, opt *options, out io.Writer) *cobra.Command {
+	var top int
+	cmd := &cobra.Command{Use: "stats", Short: "Show total indexed storage and file type statistics", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		stats, err := a.DB.IndexStats(cmd.Context())
+		if err != nil {
+			return err
+		}
+		if opt.json {
+			return output.JSON(out, stats)
+		}
+		fmt.Fprintf(out, "Sessions:    %d (%d complete, %d failed, %d running, %d pending, %d cancelled)\n", stats.Sites, stats.CompleteSites, stats.FailedSites, stats.RunningSites, stats.PendingSites, stats.CancelledSites)
+		fmt.Fprintf(out, "Files:       %d\n", stats.Files)
+		fmt.Fprintf(out, "Directories: %d\n", stats.Directories)
+		fmt.Fprintf(out, "Storage:     %s\n", output.Size(stats.Bytes))
+		if stats.RemovedFiles > 0 {
+			fmt.Fprintf(out, "Removed:     %d files, %s (soft-deleted)\n", stats.RemovedFiles, output.Size(stats.RemovedBytes))
+		}
+		if len(stats.Types) > 0 {
+			fmt.Fprintln(out, "\nEntry types:")
+			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "TYPE\tCOUNT\tSIZE")
+			for _, row := range stats.Types {
+				fmt.Fprintf(w, "%s\t%d\t%s\n", row.Type, row.Count, output.Size(row.Bytes))
+			}
+			w.Flush()
+		}
+		if len(stats.Extensions) > 0 {
+			fmt.Fprintln(out, "\nFile extensions:")
+			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "EXT\tFILES\tSIZE")
+			for i, row := range stats.Extensions {
+				if top > 0 && i >= top {
+					break
+				}
+				fmt.Fprintf(w, "%s\t%d\t%s\n", row.Extension, row.Count, output.Size(row.Bytes))
+			}
+			w.Flush()
+		}
+		return nil
+	}}
+	cmd.Flags().IntVar(&top, "top", 0, "show only the top N extensions (default all)")
 	return cmd
 }
 

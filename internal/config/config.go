@@ -103,7 +103,7 @@ func Default() (Config, error) {
 	}
 	return Config{
 		Paths: paths, CrawlConcurrency: 8, DownloadWorkers: 4,
-		HTTPTimeout: 30 * time.Second, BusyTimeout: 5 * time.Second,
+		HTTPTimeout: 30 * time.Second, BusyTimeout: 60 * time.Second,
 		PreflightTimeout: 8 * time.Second,
 		Retries:          3, DownloadDirectory: "downloads", Metadata: "normal",
 		Color: true, UserAgent: "dirhop/1",

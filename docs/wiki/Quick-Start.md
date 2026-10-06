@@ -76,6 +76,7 @@ dirhop -s mirror ls -lh
 dirhop -s mirror find "*.zip"
 dirhop find --all-sites --ext zip
 dirhop search --all-sites secrets
+dirhop stats
 dirhop download --all-sites --include '*secrets*' -o ./matches
 dirhop -s mirror stat /releases/file.zip
 dirhop -s mirror download /releases/file.zip

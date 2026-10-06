@@ -116,6 +116,7 @@ dirhop -s example-com ls
 dirhop -s example-com find "*.zip"
 dirhop find --all-sites --ext zip          # every indexed bucket/site
 dirhop search --all-sites secrets          # filename/path text across all indexes
+dirhop stats                               # total storage and file-type counts
 dirhop download --all-sites --ext zip -o ./zips
 dirhop download --all-sites --include '*secrets*' -o ./matches
 dirhop -s example-com stat /releases/file.zip
@@ -140,7 +141,7 @@ example-com:/releases > exit
 - Search: `find`, `search`, `urls`
 - Discovery: `ghw` (search public buckets via GrayHatWarfare)
 - Transfer: `download`
-- Index: `refresh`, `errors`, `changes`, `info`
+- Index: `refresh`, `errors`, `changes`, `info`, `stats`
 - Sessions: `sessions`, `session list|use|info|rename|delete|refresh`, shell `use`
 
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
@@ -167,6 +168,7 @@ dirhop -s mirror find --ext iso --json
 dirhop --session mirror find -e iso -j      # identical
 dirhop find --all-sites --ext zip
 dirhop search --all-sites secrets
+dirhop stats --top 20
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database
 ```

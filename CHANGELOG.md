@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once and print `session:path` matches. `download --all-sites --ext zip` and
   `download --all-sites --include '*secrets*'` download matching files from all
   sessions into per-session subdirectories.
+- New `stats` command reports total indexed sessions, files, directories,
+  storage, soft-deleted files, entry types, and file-extension counts/sizes.
 - `scan --retry-failed` rescans every session that previously failed, was
   cancelled, or never finished, pulled straight from the index, so a large run
   can be resumed without keeping the original list or `--failed-file`.
@@ -51,6 +53,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Azure Blob Storage and DigitalOcean Spaces bucket support.
 
 ### Changed
+- SQLite now uses one connection per process and a longer default busy timeout
+  so two `dirhop` instances writing the same database wait for each other
+  instead of failing quickly with `SQLITE_BUSY`.
 - Scans now show live crawl location in terminals: single-target crawls render
   `Crawling: bucket:/path`, and multi-bucket scans also keep a live
   "crawling ..." footer naming buckets currently in flight. Pipes, files, and

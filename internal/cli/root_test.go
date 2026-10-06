@@ -138,6 +138,14 @@ func TestAllSitesFindSearchAndDownload(t *testing.T) {
 	if !strings.Contains(found, "alpha:root.zip") || !strings.Contains(found, "beta:nested/secrets.zip") || strings.Contains(found, "manual.txt") {
 		t.Fatalf("all-sites find output: %q", found)
 	}
+	stats := run("stats")
+	if !strings.Contains(stats, "Sessions:    2") || !strings.Contains(stats, "Files:       4") || !strings.Contains(stats, ".zip") || !strings.Contains(stats, ".txt") {
+		t.Fatalf("stats output: %q", stats)
+	}
+	statsJSON := run("stats", "--json")
+	if !strings.Contains(statsJSON, `"Files": 4`) || !strings.Contains(statsJSON, `"Extension": ".zip"`) {
+		t.Fatalf("stats json output: %q", statsJSON)
+	}
 	searched := run("search", "--all-sites", "secrets")
 	if !strings.Contains(searched, "beta:nested/secrets.zip") || strings.Contains(searched, "alpha:") {
 		t.Fatalf("all-sites search output: %q", searched)

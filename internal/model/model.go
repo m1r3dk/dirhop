@@ -140,6 +140,35 @@ type DiskUsage struct {
 	Bytes       int64
 }
 
+// IndexStats summarizes the entire local index across all sessions.
+type IndexStats struct {
+	Sites          int64
+	CompleteSites  int64
+	FailedSites    int64
+	RunningSites   int64
+	PendingSites   int64
+	CancelledSites int64
+	Files          int64
+	Directories    int64
+	Bytes          int64
+	RemovedFiles   int64
+	RemovedBytes   int64
+	Types          []TypeStat
+	Extensions     []ExtensionStat
+}
+
+type TypeStat struct {
+	Type  EntryType
+	Count int64
+	Bytes int64
+}
+
+type ExtensionStat struct {
+	Extension string
+	Count     int64
+	Bytes     int64
+}
+
 // FindOptions filters filesystem entries. Zero values mean no constraint.
 type FindOptions struct {
 	Glob           string
