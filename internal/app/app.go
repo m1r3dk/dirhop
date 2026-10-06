@@ -151,7 +151,7 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 	if full || site.LastCrawledAt == nil {
 		mode = model.CrawlModeFull
 	}
-	run := &model.CrawlRun{SiteID: site.ID, Mode: mode, Status: model.ScanStatusRunning, StartedAt: time.Now().UTC()}
+	run := &model.CrawlRun{SiteID: site.ID, Mode: mode, Status: model.ScanStatusRunning, StartedAt: time.Now().UTC(), TargetName: site.Name, CurrentPath: "/"}
 	if err := a.DB.StartCrawlRun(ctx, run); err != nil {
 		return err
 	}
@@ -418,6 +418,7 @@ func (r *crawlRepository) RecordDirectory(ctx context.Context, outcome crawler.D
 	}
 
 	r.mu.Lock()
+	r.run.CurrentPath = dirPath
 	r.directories++
 	for _, entry := range batch {
 		if entry.Type == model.EntryTypeFile {

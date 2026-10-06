@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,12 +204,69 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 
 	var printMu sync.Mutex
 	var done atomic.Int64
+	// Live "currently crawling" footer. Batch output prints one result line per
+	// finished bucket; this adds a single redrawn line under them showing which
+	// buckets are in flight right now, so a long-running big bucket does not look
+	// like a stall. Terminal-only, so pipes/files/JSON stay clean.
+	showFooter := !opt.quiet && !opt.json && len(specs) > 1 && isTerminalWriter(out)
+	inflight := map[int]string{}
+	footerShown := false
+	clearFooter := func() { // caller holds printMu
+		if footerShown {
+			fmt.Fprint(out, "\r\x1b[K")
+			footerShown = false
+		}
+	}
+	drawFooter := func() { // caller holds printMu
+		if !showFooter || len(inflight) == 0 {
+			return
+		}
+		labels := make([]string, 0, len(inflight))
+		for _, l := range inflight {
+			labels = append(labels, l)
+		}
+		sort.Strings(labels)
+		const maxShown = 4
+		shown := labels
+		extra := 0
+		if len(shown) > maxShown {
+			extra = len(shown) - maxShown
+			shown = shown[:maxShown]
+		}
+		line := "crawling " + strings.Join(shown, ", ")
+		if extra > 0 {
+			line += fmt.Sprintf(" (+%d more)", extra)
+		}
+		fmt.Fprintf(out, "\r\x1b[K%s", line)
+		footerShown = true
+	}
+	startInflight := func(i int, label string) {
+		if !showFooter {
+			return
+		}
+		printMu.Lock()
+		defer printMu.Unlock()
+		inflight[i] = label
+		clearFooter()
+		drawFooter()
+	}
+	endInflight := func(i int) {
+		if !showFooter {
+			return
+		}
+		printMu.Lock()
+		defer printMu.Unlock()
+		delete(inflight, i)
+		clearFooter()
+		drawFooter()
+	}
 	report := func(i int, spec urlSpec, res batchResult) {
 		if opt.quiet || opt.json {
 			return
 		}
 		printMu.Lock()
 		defer printMu.Unlock()
+		clearFooter()
 		prefix := ""
 		if len(specs) > 1 {
 			// With concurrency, finish order is not input order, so count
@@ -224,6 +283,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		default:
 			fmt.Fprintf(out, "%sIndexed %s: %d files, %s\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
 		}
+		drawFooter()
 	}
 
 	if workers == 1 {
@@ -231,7 +291,9 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			startInflight(i, targetLabel(spec.URL))
 			results[i], errs[i] = indexOne(spec)
+			endInflight(i)
 			report(i, spec, results[i])
 		}
 	} else {
@@ -247,7 +309,9 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 						errs[i] = err
 						continue
 					}
+					startInflight(i, targetLabel(specs[i].URL))
 					results[i], errs[i] = indexOne(specs[i])
+					endInflight(i)
 					report(i, specs[i], results[i])
 				}
 			}()
@@ -257,6 +321,11 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		}
 		close(jobs)
 		wg.Wait()
+	}
+	if showFooter {
+		printMu.Lock()
+		clearFooter()
+		printMu.Unlock()
 	}
 
 	var firstErr error
@@ -308,6 +377,19 @@ func canonicalOrRaw(raw string) string {
 		return c
 	}
 	return raw
+}
+
+// targetLabel is a short, human-friendly name for a target used in the live
+// "crawling ..." footer: the bucket/container name for a recognized bucket,
+// otherwise the hostname.
+func targetLabel(rawURL string) string {
+	if t, ok := bucket.Detect(rawURL); ok && t.Bucket != "" {
+		return t.Bucket
+	}
+	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return rawURL
 }
 
 // writeFailedFile records inaccessible/failed targets to a file so a large run

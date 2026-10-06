@@ -163,7 +163,9 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 	workers := a.bucketWorkers(site)
 	_, err = bucket.Walk(ctx, a.HTTP, target, a.Config.UserAgent, workers, func(objects []bucket.Object, prefixes []string) error {
 		for _, p := range prefixes {
-			if err := ensureDir(path.Clean("/" + strings.TrimPrefix(p, target.Prefix))); err != nil {
+			virtual := path.Clean("/" + strings.TrimPrefix(p, target.Prefix))
+			run.CurrentPath = virtual
+			if err := ensureDir(virtual); err != nil {
 				return err
 			}
 		}
@@ -171,6 +173,7 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 		for _, o := range objects {
 			rel := strings.TrimPrefix(o.Key, target.Prefix)
 			virtual := path.Clean("/" + rel)
+			run.CurrentPath = virtual
 			if virtual == "/" {
 				continue
 			}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"golang.org/x/term"
@@ -24,6 +25,20 @@ func TestProgressPrinterDrawsForShellTerminal(t *testing.T) {
 	done()
 	if buf.Len() == 0 {
 		t.Fatal("progress printer produced no output for the shell terminal")
+	}
+}
+
+func TestProgressPrinterShowsCurrentTargetAndPath(t *testing.T) {
+	var buf bytes.Buffer
+	terminal := term.NewTerminal(&buf, "")
+
+	update, done := progressPrinter(terminal, false)
+	update(model.CrawlRun{TargetName: "bucket-name", CurrentPath: "/dir/file.bin", Directories: 3, Files: 7, Bytes: 2048})
+	done()
+
+	out := buf.String()
+	if !strings.Contains(out, "Crawling: bucket-name:/dir/file.bin") {
+		t.Fatalf("progress did not include current target/path: %q", out)
 	}
 }
 

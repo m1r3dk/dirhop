@@ -99,6 +99,10 @@ type CrawlRun struct {
 	Bytes         int64
 	ErrorCount    int64
 	FailureReason string
+	// TargetName and CurrentPath are transient live-progress fields. They are not
+	// persisted in crawl_runs; they let terminals show what is being crawled now.
+	TargetName  string
+	CurrentPath string
 }
 
 // CrawlError records a recoverable or terminal crawl error.

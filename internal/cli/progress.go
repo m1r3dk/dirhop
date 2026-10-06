@@ -33,8 +33,20 @@ func progressPrinter(w io.Writer, quiet bool) (func(model.CrawlRun), func()) {
 		}
 		last, printed = time.Now(), true
 		rate := float64(run.Directories) / max(time.Since(start).Seconds(), 0.001)
-		fmt.Fprintf(w, "\r\x1b[KDirectories: %d  Files: %d  Size: %s  Errors: %d  %.0f dirs/s",
-			run.Directories, run.Files, output.Size(run.Bytes), run.ErrorCount, rate)
+		where := run.TargetName
+		if run.CurrentPath != "" {
+			if where != "" {
+				where += ":"
+			}
+			where += run.CurrentPath
+		}
+		if where == "" {
+			fmt.Fprintf(w, "\r\x1b[KDirectories: %d  Files: %d  Size: %s  Errors: %d  %.0f dirs/s",
+				run.Directories, run.Files, output.Size(run.Bytes), run.ErrorCount, rate)
+			return
+		}
+		fmt.Fprintf(w, "\r\x1b[KCrawling: %s  Directories: %d  Files: %d  Size: %s  Errors: %d  %.0f dirs/s",
+			truncateMiddle(where, 80), run.Directories, run.Files, output.Size(run.Bytes), run.ErrorCount, rate)
 	}
 	done := func() {
 		mu.Lock()
@@ -44,6 +56,20 @@ func progressPrinter(w io.Writer, quiet bool) (func(model.CrawlRun), func()) {
 		}
 	}
 	return update, done
+}
+
+func truncateMiddle(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	const marker = "..."
+	if maxLen <= len(marker) {
+		return s[:maxLen]
+	}
+	keep := maxLen - len(marker)
+	left := keep/2 + keep%2
+	right := keep / 2
+	return s[:left] + marker + s[len(s)-right:]
 }
 
 // isTerminalWriter reports whether w draws to an interactive terminal: either a

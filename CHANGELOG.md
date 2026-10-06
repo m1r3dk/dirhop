@@ -47,6 +47,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Azure Blob Storage and DigitalOcean Spaces bucket support.
 
 ### Changed
+- Scans now show live crawl location in terminals: single-target crawls render
+  `Crawling: bucket:/path`, and multi-bucket scans also keep a live
+  "crawling ..." footer naming buckets currently in flight. Pipes, files, and
+  `--json` stay clean.
 - Preflight is much faster and no longer floods the network: it uses a dedicated
   client with a short per-probe timeout (default 8s, `preflight_timeout` in
   config) and zero retries, so each target is checked with exactly one request
