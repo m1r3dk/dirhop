@@ -7,6 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `scan --retry-failed` rescans every session that previously failed, was
+  cancelled, or never finished, pulled straight from the index, so a large run
+  can be resumed without keeping the original list or `--failed-file`.
 - `scan` shows live preflight progress (`Preflight: N/M checked`) for large
   lists and can write every unscannable target to a retry file with
   `--failed-file PATH`. The file lists private, missing, errored, and

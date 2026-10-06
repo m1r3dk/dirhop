@@ -192,6 +192,33 @@ func (d *DB) ListSites(ctx context.Context) ([]model.Site, error) {
 	}
 	return out, rows.Err()
 }
+
+// SitesByStatus returns sites whose scan_status is in the given set, ordered by
+// name. An empty set returns nothing.
+func (d *DB) SitesByStatus(ctx context.Context, statuses ...model.ScanStatus) ([]model.Site, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, len(statuses))
+	for i, s := range statuses {
+		args[i] = string(s)
+	}
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+siteColumns+` FROM sites WHERE scan_status IN (`+placeholders+`) ORDER BY name COLLATE NOCASE`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Site
+	for rows.Next() {
+		x, err := scanSite(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *x)
+	}
+	return out, rows.Err()
+}
 func (d *DB) SetActiveSite(ctx context.Context, id int64) error {
 	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `UPDATE app_state SET active_site_id=(SELECT id FROM sites WHERE id=?) WHERE singleton=1`, id)

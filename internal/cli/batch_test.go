@@ -437,6 +437,77 @@ func TestScanFailedFileIsWrittenAndReReadable(t *testing.T) {
 	}
 }
 
+// --retry-failed rescans only the sessions that previously failed (pulled from
+// the DB), recovering the one that now succeeds without re-crawling the one that
+// already completed.
+func TestScanRetryFailed(t *testing.T) {
+	var up atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/good/":
+			fmt.Fprint(w, `<title>Index of /good</title><a href="a.zip">a.zip</a>`)
+		case "/flaky/":
+			if up.Load() {
+				fmt.Fprint(w, `<title>Index of /flaky</title><a href="b.zip">b.zip</a>`)
+				return
+			}
+			http.Error(w, "down", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+	list := filepath.Join(tmp, "urls.txt")
+	_ = os.WriteFile(list, []byte(server.URL+"/good/\n"+server.URL+"/flaky/\n"), 0o600)
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	// First scan: good succeeds, flaky fails.
+	if _, err := run("scan", "-f", list, "--no-preflight"); ExitCode(err) != 5 {
+		t.Fatalf("first scan should report a failure, got %v", err)
+	}
+	// Bring the flaky site up and retry just the failures.
+	up.Store(true)
+	out, err := run("scan", "--retry-failed", "--no-preflight")
+	if err != nil {
+		t.Fatalf("retry-failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Retrying 1 previously failed session(s).") {
+		t.Fatalf("expected retry notice for exactly the 1 failed session, got:\n%s", out)
+	}
+	if !strings.Contains(out, "flaky") {
+		t.Fatalf("retry did not target the flaky session:\n%s", out)
+	}
+	// Flaky is now complete and browsable.
+	if ls, err := run("-s", "127-0-0-1-flaky", "ls"); err != nil || !strings.Contains(ls, "b.zip") {
+		// Name is bucket-based only for recognized buckets; for a plain host it is
+		// host+path. Fall back to listing sessions to confirm it is complete.
+		sessions, _ := run("sessions", "--status", "complete")
+		if !strings.Contains(sessions, "flaky") {
+			t.Fatalf("flaky not complete after retry: %v %s\n%s", err, ls, sessions)
+		}
+	}
+	// Nothing left to retry.
+	out, _ = run("scan", "--retry-failed", "--no-preflight")
+	if !strings.Contains(out, "No failed sessions to retry.") {
+		t.Fatalf("expected no-failures message, got:\n%s", out)
+	}
+}
+
 func TestResolveWorkers(t *testing.T) {
 	cases := []struct{ parallel, sites, want int }{
 		{0, 0, 1},    // nothing to do

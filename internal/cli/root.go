@@ -34,6 +34,7 @@ type options struct {
 	noPreflight bool
 	forceRescan bool
 	failedFile  string
+	retryFailed bool
 	json        bool
 	quiet       bool
 	noColor     bool
@@ -254,9 +255,31 @@ ignored, and an optional second field names the session:
 			if opt.preflight && opt.noPreflight {
 				return fmt.Errorf("%w: --preflight and --no-preflight are mutually exclusive", ErrInvalidArguments)
 			}
-			specs, err := collectURLs(args, file, opt.name, cmd.InOrStdin())
-			if err != nil {
-				return err
+			var specs []urlSpec
+			if opt.retryFailed {
+				if len(args) > 0 || file != "" {
+					return fmt.Errorf("%w: --retry-failed takes its targets from past failures, not arguments or -f", ErrInvalidArguments)
+				}
+				var err error
+				specs, err = failedSpecs(cmd.Context(), a)
+				if err != nil {
+					return err
+				}
+				if len(specs) == 0 {
+					if !opt.quiet && !opt.json {
+						fmt.Fprintln(out, "No failed sessions to retry.")
+					}
+					return nil
+				}
+				if !opt.quiet && !opt.json {
+					fmt.Fprintf(out, "Retrying %d previously failed session(s).\n", len(specs))
+				}
+			} else {
+				var err error
+				specs, err = collectURLs(args, file, opt.name, cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
 			}
 			scanOpt := *opt
 			if len(specs) > 1 && !scanOpt.noPreflight {
@@ -271,7 +294,25 @@ ignored, and an optional second field names the session:
 	cmd.Flags().BoolVar(&opt.noPreflight, "no-preflight", false, "disable the automatic preflight check for multi-target scans")
 	cmd.Flags().BoolVar(&opt.forceRescan, "rescan", false, "re-crawl buckets that were already scanned successfully (default skips them)")
 	cmd.Flags().StringVar(&opt.failedFile, "failed-file", "", "write targets that could not be scanned (private/missing/errored) to this file for retry")
+	cmd.Flags().BoolVar(&opt.retryFailed, "retry-failed", false, "rescan sessions that previously failed, were cancelled, or never finished")
 	return cmd
+}
+
+// failedSpecs returns the URLs of sessions that failed, were cancelled, or never
+// finished (still pending/running from an interrupted run), so `scan
+// --retry-failed` can re-attempt exactly those.
+func failedSpecs(ctx context.Context, a *app.App) ([]urlSpec, error) {
+	sites, err := a.DB.SitesByStatus(ctx,
+		model.ScanStatusFailed, model.ScanStatusCancelled,
+		model.ScanStatusPending, model.ScanStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	specs := make([]urlSpec, 0, len(sites))
+	for _, s := range sites {
+		specs = append(specs, urlSpec{URL: s.CanonicalURL})
+	}
+	return specs, nil
 }
 
 func validMetadata(level string) error {
