@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `find --all-sites` and `search --all-sites` search every indexed session at
+  once and print `session:path` matches. `download --all-sites --ext zip` and
+  `download --all-sites --include '*secrets*'` download matching files from all
+  sessions into per-session subdirectories.
 - `scan --retry-failed` rescans every session that previously failed, was
   cancelled, or never finished, pulled straight from the index, so a large run
   can be resumed without keeping the original list or `--failed-file`.

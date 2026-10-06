@@ -25,8 +25,8 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 
 ## Search
 
-- `find <pattern>` - `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after`
-- `search <text>`
+- `find <pattern>` - `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after`, `--all-sites`
+- `search <text>` - `--all-sites`
 - `urls` - `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i`
 
 ## Discovery
@@ -38,8 +38,8 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 ## Transfer
 
 - `download <path...>` - `--output/-o`, `--workers/-w`, `--all/-a`,
-  `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`,
-  `--skip-existing`, `--max-rate`
+  `--all-sites`, `--ext`, `--include/-i`, `--exclude/-e`, `--segments`,
+  `--resume`, `--overwrite`, `--skip-existing`, `--max-rate`
 
 ## Index
 
@@ -65,6 +65,9 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 ```sh
 dirhop scan -f buckets.txt --preflight --parallel 0
 dirhop -s mirror find --ext iso --json
+dirhop find --all-sites --ext zip
+dirhop search --all-sites secrets
+dirhop download --all-sites --include '*secrets*' -o ./matches
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database
 dirhop -s mirror find --size '>1GB'

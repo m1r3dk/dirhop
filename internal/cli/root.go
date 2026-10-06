@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -703,12 +704,10 @@ func newDU(a *app.App, opt *options, out io.Writer) *cobra.Command {
 
 func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var regex, ext, sizeRange, modifiedAfter, typeName string
+	var allSites bool
 	cmd := &cobra.Command{Use: "find [pattern]", Short: "Find indexed paths using glob and metadata filters", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		site, err := selected(cmd.Context(), a, opt)
-		if err != nil {
-			return err
-		}
 		find := model.FindOptions{Regex: regex}
+		var err error
 		if len(args) > 0 {
 			find.Glob = args[0]
 			if !strings.ContainsAny(find.Glob, "*?[") {
@@ -738,6 +737,17 @@ func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		default:
 			return fmt.Errorf("%w: invalid type", ErrInvalidArguments)
 		}
+		if allSites {
+			results, err := findAcrossSites(cmd.Context(), a, find)
+			if err != nil {
+				return err
+			}
+			return printGlobalMatches(out, opt, results)
+		}
+		site, err := selected(cmd.Context(), a, opt)
+		if err != nil {
+			return err
+		}
 		entries, err := a.FS(site).Find(cmd.Context(), "/", find)
 		if err != nil {
 			return mapFSError(err)
@@ -755,11 +765,20 @@ func newFind(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&sizeRange, "size", "", "size constraint, for example >1GB or 100MB..2GB")
 	cmd.Flags().StringVar(&modifiedAfter, "modified-after", "", "modified on or after YYYY-MM-DD")
 	cmd.Flags().StringVarP(&typeName, "type", "t", "", "file or directory")
+	cmd.Flags().BoolVar(&allSites, "all-sites", false, "search every indexed session and print session:path")
 	return cmd
 }
 
 func newSearch(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "search <text>", Short: "Search indexed paths by name or path text", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var allSites bool
+	cmd := &cobra.Command{Use: "search <text>", Short: "Search indexed paths by name or path text", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if allSites {
+			results, err := searchAcrossSites(cmd.Context(), a, args[0], 0)
+			if err != nil {
+				return err
+			}
+			return printGlobalMatches(out, opt, results)
+		}
 		site, err := selected(cmd.Context(), a, opt)
 		if err != nil {
 			return err
@@ -776,6 +795,133 @@ func newSearch(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.Flags().BoolVar(&allSites, "all-sites", false, "search every indexed session and print session:path")
+	return cmd
+}
+
+type globalMatch struct {
+	Site  string          `json:"site"`
+	Path  string          `json:"path"`
+	URL   string          `json:"url"`
+	Type  model.EntryType `json:"type"`
+	Size  *int64          `json:"size,omitempty"`
+	Entry model.Entry     `json:"-"`
+}
+
+func findAcrossSites(ctx context.Context, a *app.App, find model.FindOptions) ([]globalMatch, error) {
+	sites, err := a.Sessions.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []globalMatch
+	for _, site := range sites {
+		entries, err := a.FS(&site).Find(ctx, "/", find)
+		if err != nil {
+			return nil, mapFSError(err)
+		}
+		for _, entry := range entries {
+			out = append(out, newGlobalMatch(site, entry))
+		}
+	}
+	return out, nil
+}
+
+func searchAcrossSites(ctx context.Context, a *app.App, query string, limit int) ([]globalMatch, error) {
+	sites, err := a.Sessions.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []globalMatch
+	for _, site := range sites {
+		remaining := 0
+		if limit > 0 {
+			remaining = limit - len(out)
+			if remaining <= 0 {
+				break
+			}
+		}
+		entries, err := a.FS(&site).Search(ctx, "/", query, remaining)
+		if err != nil {
+			return nil, mapFSError(err)
+		}
+		for _, entry := range entries {
+			out = append(out, newGlobalMatch(site, entry))
+		}
+	}
+	return out, nil
+}
+
+func newGlobalMatch(site model.Site, entry model.Entry) globalMatch {
+	return globalMatch{
+		Site:  site.Name,
+		Path:  strings.TrimPrefix(entry.NormalizedPath, "/"),
+		URL:   entry.URL,
+		Type:  entry.Type,
+		Size:  entry.Size,
+		Entry: entry,
+	}
+}
+
+func printGlobalMatches(out io.Writer, opt *options, matches []globalMatch) error {
+	if opt.json {
+		return output.JSON(out, matches)
+	}
+	for _, match := range matches {
+		fmt.Fprintf(out, "%s:%s\n", match.Site, match.Path)
+	}
+	return nil
+}
+
+func filterGlobalMatches(matches []globalMatch, include, exclude string) []globalMatch {
+	if include == "" && exclude == "" {
+		return matches
+	}
+	out := matches[:0]
+	for _, match := range matches {
+		if include != "" && !pathGlobOrSubstring(include, match.Path) {
+			continue
+		}
+		if exclude != "" && pathGlobOrSubstring(exclude, match.Path) {
+			continue
+		}
+		out = append(out, match)
+	}
+	return out
+}
+
+func pathGlobOrSubstring(pattern, p string) bool {
+	matched, _ := path.Match(pattern, p)
+	nameMatched, _ := path.Match(pattern, path.Base(p))
+	if matched || nameMatched {
+		return true
+	}
+	return strings.Contains(strings.ToLower(p), strings.ToLower(pattern))
+}
+
+func downloadGlobalMatches(ctx context.Context, a *app.App, matches []globalMatch, destination string, opts downloader.Options) (downloader.Result, error) {
+	bySite := map[string][]model.Entry{}
+	for _, match := range matches {
+		bySite[match.Site] = append(bySite[match.Site], match.Entry)
+	}
+	var total downloader.Result
+	var errs []error
+	for siteName, entries := range bySite {
+		site, err := a.Site(ctx, siteName)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result, err := a.DownloadEntries(ctx, site, entries, filepath.Join(destination, site.Name), opts)
+		total.Planned += result.Planned
+		total.Completed += result.Completed
+		total.Skipped += result.Skipped
+		total.Failed += result.Failed
+		total.Bytes += result.Bytes
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", site.Name, err))
+		}
+	}
+	return total, errors.Join(errs...)
 }
 
 func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
@@ -847,9 +993,18 @@ func newURLs(a *app.App, opt *options, out io.Writer) *cobra.Command {
 func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var destination string
 	var workers, segments int
-	var resume, overwrite, skip, all bool
-	var maxRate, include, exclude string
+	var resume, overwrite, skip, all, allSites bool
+	var maxRate, include, exclude, ext string
 	cmd := &cobra.Command{Use: "download <path> [path...]", Short: "Download indexed files or directories", Args: func(_ *cobra.Command, args []string) error {
+		if allSites {
+			if len(args) > 0 {
+				return fmt.Errorf("%w: --all-sites uses --ext/--include filters, not explicit paths", ErrInvalidArguments)
+			}
+			if all || ext != "" || include != "" {
+				return nil
+			}
+			return fmt.Errorf("%w: --all-sites requires --ext, --include, or --all", ErrInvalidArguments)
+		}
 		if all && len(args) == 0 || !all && len(args) > 0 {
 			return nil
 		}
@@ -876,6 +1031,24 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		if err := exclusive(cmd, "overwrite", "skip-existing"); err != nil {
 			return err
 		}
+		if allSites {
+			find := model.FindOptions{Type: model.EntryTypeFile}
+			if !all && ext != "" {
+				find.Extensions = strings.Split(ext, ",")
+			}
+			results, err := findAcrossSites(cmd.Context(), a, find)
+			if err != nil {
+				return err
+			}
+			results = filterGlobalMatches(results, include, exclude)
+			result, err := downloadGlobalMatches(cmd.Context(), a, results, destination, downloader.Options{Concurrency: workers, Policy: policy, Retries: a.Config.Retries, Segments: segments, MaxRate: rate, Restart: !resume})
+			if opt.json {
+				_ = output.JSON(out, result)
+			} else {
+				fmt.Fprintf(out, "Completed: %d  Skipped: %d  Failed: %d  Bytes: %s\n", result.Completed, result.Skipped, result.Failed, output.Size(result.Bytes))
+			}
+			return err
+		}
 		if all {
 			args = []string{"/"}
 		}
@@ -894,6 +1067,8 @@ func newDownload(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace existing files")
 	cmd.Flags().BoolVar(&skip, "skip-existing", false, "skip existing files")
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "download all indexed files")
+	cmd.Flags().BoolVar(&allSites, "all-sites", false, "download matches from every indexed session into per-session subdirectories")
+	cmd.Flags().StringVar(&ext, "ext", "", "with --all-sites, download only this extension or comma-separated extensions")
 	cmd.Flags().StringVarP(&include, "include", "i", "", "include matching relative paths")
 	cmd.Flags().StringVarP(&exclude, "exclude", "e", "", "exclude matching relative paths")
 	cmd.Flags().StringVar(&maxRate, "max-rate", "", "approximate bytes per second, for example 10MB")

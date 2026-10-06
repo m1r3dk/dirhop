@@ -85,6 +85,77 @@ func TestOneShotCommandsReusePersistentIndex(t *testing.T) {
 	}
 }
 
+func TestAllSitesFindSearchAndDownload(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.URL.Path {
+		case "/a/":
+			fmt.Fprint(w, `<title>Index of /a/</title><a href="root.zip">root.zip</a><a href="manual.txt">manual.txt</a>`)
+		case "/a/root.zip":
+			fmt.Fprint(w, "ALPHAZIP")
+		case "/a/manual.txt":
+			fmt.Fprint(w, "MANUAL")
+		case "/b/":
+			fmt.Fprint(w, `<title>Index of /b/</title><a href="nested/">nested/</a>`)
+		case "/b/nested/":
+			fmt.Fprint(w, `<title>Index of /b/nested/</title><a href="secrets.zip">secrets.zip</a><a href="notes.txt">notes.txt</a>`)
+		case "/b/nested/secrets.zip":
+			fmt.Fprint(w, "BETAZIP")
+		case "/b/nested/notes.txt":
+			fmt.Fprint(w, "NOTES")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "index.db")+"\"\nhistory = \""+filepath.Join(tmp, "history")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		root, cleanup, err := newRoot(&stdout, &stderr, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("dirhop %v: %v; stderr=%s", args, err, stderr.String())
+		}
+		return stdout.String()
+	}
+
+	run("--name", "alpha", "scan", server.URL+"/a/")
+	run("--name", "beta", "scan", server.URL+"/b/")
+	indexedRequests := requests.Load()
+
+	found := run("find", "--all-sites", "--ext", "zip")
+	if !strings.Contains(found, "alpha:root.zip") || !strings.Contains(found, "beta:nested/secrets.zip") || strings.Contains(found, "manual.txt") {
+		t.Fatalf("all-sites find output: %q", found)
+	}
+	searched := run("search", "--all-sites", "secrets")
+	if !strings.Contains(searched, "beta:nested/secrets.zip") || strings.Contains(searched, "alpha:") {
+		t.Fatalf("all-sites search output: %q", searched)
+	}
+	if requests.Load() != indexedRequests {
+		t.Fatal("all-sites find/search unexpectedly accessed network")
+	}
+
+	downloadDir := filepath.Join(tmp, "downloads")
+	run("download", "--all-sites", "--ext", "zip", "--output", downloadDir)
+	if got, err := os.ReadFile(filepath.Join(downloadDir, "alpha", "root.zip")); err != nil || string(got) != "ALPHAZIP" {
+		t.Fatalf("alpha zip = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(downloadDir, "beta", "nested", "secrets.zip")); err != nil || string(got) != "BETAZIP" {
+		t.Fatalf("beta zip = %q, %v", got, err)
+	}
+}
+
 func TestUnknownSessionIsClearExitCode3(t *testing.T) {
 	tmp := t.TempDir()
 	configPath := filepath.Join(tmp, "config.toml")

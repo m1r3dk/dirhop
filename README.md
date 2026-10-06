@@ -114,6 +114,10 @@ dirhop -s example-com changes
 dirhop sessions
 dirhop -s example-com ls
 dirhop -s example-com find "*.zip"
+dirhop find --all-sites --ext zip          # every indexed bucket/site
+dirhop search --all-sites secrets          # filename/path text across all indexes
+dirhop download --all-sites --ext zip -o ./zips
+dirhop download --all-sites --include '*secrets*' -o ./matches
 dirhop -s example-com stat /releases/file.zip
 dirhop -s example-com download /releases/file.zip
 ```
@@ -149,9 +153,9 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 | --- | --- |
 | `ls` | `--long/-l`, `--human-readable/-h`, `--all/-a`, `--reverse/-r`, `--sort` |
 | `tree` | `--depth/-L`, `--dirs-only/-d`, `--files-only/-f`, `--sizes` |
-| `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after` |
+| `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after`, `--all-sites` |
 | `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
-| `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
+| `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--all-sites`, `--ext`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
 | `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight`, `--rescan`, `--failed-file`, `--retry-failed` |
 | `ghw` | `--files`, `--type/-t`, `--ext/-e`, `--limit/-l`, `--order`, `--direction`, `--full-path`, `--scan`, `--urls` |
 | `refresh` | `--full/-f`, `--metadata/-m` |
@@ -161,6 +165,8 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 ```sh
 dirhop -s mirror find --ext iso --json
 dirhop --session mirror find -e iso -j      # identical
+dirhop find --all-sites --ext zip
+dirhop search --all-sites secrets
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database
 ```

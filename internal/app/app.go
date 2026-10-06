@@ -250,6 +250,28 @@ func (a *App) Download(ctx context.Context, site *model.Site, paths []string, de
 	return result, nil
 }
 
+// DownloadEntries downloads an explicit set of indexed file entries while
+// preserving each entry's full path relative to the session root.
+func (a *App) DownloadEntries(ctx context.Context, site *model.Site, entries []model.Entry, destination string, opts downloader.Options) (downloader.Result, error) {
+	plan := make([]downloader.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsFile() {
+			continue
+		}
+		size := int64(-1)
+		if entry.Size != nil {
+			size = *entry.Size
+		}
+		plan = append(plan, downloader.Entry{Path: strings.TrimPrefix(entry.NormalizedPath, "/"), URL: entry.URL, Size: size, ID: entry.ID})
+	}
+	d := &downloader.Downloader{Client: a.HTTP.HTTPClient(), State: &downloadState{db: a.DB, siteID: site.ID}}
+	result, err := d.DownloadPlan(ctx, plan, destination, opts)
+	if err != nil {
+		return result, fmt.Errorf("%w: %v", ErrDownload, err)
+	}
+	return result, nil
+}
+
 type downloadSource struct{ fs *filesystem.FS }
 
 func (s *downloadSource) Expand(ctx context.Context, paths []string) ([]downloader.Entry, error) {
