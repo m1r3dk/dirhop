@@ -19,6 +19,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - name: gofmt
+        if: runner.os != 'Windows'
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './.git/*'))"
       - run: go vet ./...
+      - run: go test -race ./...
       - run: go build ./cmd/dirhop
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

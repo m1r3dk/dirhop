@@ -4,6 +4,19 @@
 
 > Use `dirhop` only with public directory listings or systems you are explicitly authorized to access. It does not discover unlinked paths or bypass access controls.
 
+## Disclaimer
+
+`dirhop` is intended **solely for authorized use**: public directory listings,
+publicly listable buckets, and systems you own or have explicit, documented
+permission to access. You are solely responsible for how you use it and for
+complying with all applicable laws and the terms of service of any target.
+
+The author(s) and contributors provide this software "as is", without warranty
+of any kind, and **accept no liability** for any misuse, damage, or unlawful or
+malicious activity carried out with it. By using `dirhop` you agree that you
+alone bear responsibility for your actions. See [`LICENSE`](LICENSE) and
+[`SECURITY.md`](SECURITY.md).
+
 ## Install
 
 ```sh
