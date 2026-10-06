@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"path"
 	"strings"
 	"time"
@@ -11,6 +14,89 @@ import (
 	"github.com/m1r3dk/dirhop/internal/bucket"
 	"github.com/m1r3dk/dirhop/internal/model"
 )
+
+// Preflight is the accessibility verdict for one target, plus how it was
+// classified (native bucket hostname vs. an unrecognized host).
+type Preflight struct {
+	URL    string
+	Access bucket.Access
+	Bucket bool // true if the URL is a recognized bucket hostname
+	Err    error
+}
+
+// Accessible reports whether a full scan is worth attempting.
+func (p Preflight) Accessible() bool {
+	return p.Access == bucket.AccessPublic
+}
+
+// PreflightAccess performs one cheap accessibility check for a raw URL. For a
+// recognized bucket hostname it issues a single max-1-key listing request. For
+// generic HTTP directory listings it checks reachability with HEAD, falling back
+// to a tiny GET when a server does not support HEAD.
+func (a *App) PreflightAccess(ctx context.Context, rawURL string) Preflight {
+	target, ok := bucket.Detect(rawURL)
+	if !ok {
+		access, err := a.checkGenericAccess(ctx, rawURL)
+		return Preflight{URL: rawURL, Access: access, Bucket: false, Err: err}
+	}
+	access, err := bucket.CheckAccess(ctx, a.HTTP, target, a.Config.UserAgent)
+	return Preflight{URL: rawURL, Access: access, Bucket: true, Err: err}
+}
+
+func (a *App) checkGenericAccess(ctx context.Context, rawURL string) (bucket.Access, error) {
+	access, err, retryWithGet := a.doGenericPreflight(ctx, http.MethodHead, rawURL)
+	if retryWithGet {
+		return a.doGenericPreflightGet(ctx, rawURL)
+	}
+	return access, err
+}
+
+func (a *App) doGenericPreflightGet(ctx context.Context, rawURL string) (bucket.Access, error) {
+	access, err, _ := a.doGenericPreflight(ctx, http.MethodGet, rawURL)
+	return access, err
+}
+
+func (a *App) doGenericPreflight(ctx context.Context, method, rawURL string) (bucket.Access, error, bool) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	if err != nil {
+		return bucket.AccessError, err, false
+	}
+	if a.Config.UserAgent != "" {
+		req.Header.Set("User-Agent", a.Config.UserAgent)
+	}
+	if method == http.MethodGet {
+		req.Header.Set("Range", "bytes=0-0")
+	}
+	resp, err := a.HTTP.Do(req)
+	if err != nil {
+		if isNoSuchHost(err) {
+			return bucket.AccessMissing, nil, false
+		}
+		return bucket.AccessError, err, false
+	}
+	defer resp.Body.Close()
+	if method == http.MethodGet {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	}
+	if method == http.MethodHead && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented) {
+		return bucket.AccessError, nil, true
+	}
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 400:
+		return bucket.AccessPublic, nil, false
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+		return bucket.AccessDenied, nil, false
+	case resp.StatusCode == http.StatusNotFound:
+		return bucket.AccessMissing, nil, false
+	default:
+		return bucket.AccessError, fmt.Errorf("unexpected HTTP status %d", resp.StatusCode), false
+	}
+}
+
+func isNoSuchHost(err error) bool {
+	var dns *net.DNSError
+	return errors.As(err, &dns) && dns.IsNotFound
+}
 
 // crawlBucket indexes an object-storage bucket (S3, GCS, DigitalOcean Spaces,
 // or Azure Blob) via its paginated listing API. Keys map to files; every key

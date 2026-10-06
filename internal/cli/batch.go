@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/m1r3dk/dirhop/internal/app"
+	"github.com/m1r3dk/dirhop/internal/bucket"
 	"github.com/m1r3dk/dirhop/internal/output"
 	"github.com/m1r3dk/dirhop/internal/session"
 )
@@ -123,6 +124,19 @@ type batchResult struct {
 // many buckets keeps the pipeline full. SQLite writes stay safe because the
 // database serializes write transactions internally.
 func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, metadata string, opt *options, out io.Writer) error {
+	if opt.preflight && len(specs) > 0 {
+		var err error
+		specs, err = preflightFilter(ctx, a, specs, opt, out)
+		if err != nil {
+			return err
+		}
+		if len(specs) == 0 {
+			if !opt.quiet && !opt.json {
+				fmt.Fprintln(out, "Preflight: no accessible targets to scan.")
+			}
+			return nil
+		}
+	}
 	results := make([]batchResult, len(specs))
 	errs := make([]error, len(specs))
 	single := len(specs) == 1
@@ -152,13 +166,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		return res, err
 	}
 
-	workers := opt.parallel
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(specs) {
-		workers = len(specs)
-	}
+	workers := resolveWorkers(opt.parallel, len(specs))
 
 	var printMu sync.Mutex
 	var done atomic.Int64
@@ -249,3 +257,84 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 type quietError struct{ error }
 
 func (q quietError) Unwrap() error { return q.error }
+
+// resolveWorkers turns the --parallel value into a worker count. 0 means auto:
+// scale with the workload up to a sane cap, since indexing is network-bound and
+// most buckets spend their time waiting. An explicit value is honored (clamped
+// to a hard ceiling); either way the pool never exceeds the number of sites.
+func resolveWorkers(parallel, sites int) int {
+	const (
+		autoCap = 64  // auto never exceeds this
+		hardCap = 256 // explicit --parallel ceiling
+	)
+	if sites < 1 {
+		return 1
+	}
+	switch {
+	case parallel <= 0: // auto
+		w := sites
+		if w > autoCap {
+			w = autoCap
+		}
+		return w
+	case parallel > hardCap:
+		return min(hardCap, sites)
+	default:
+		return min(parallel, sites)
+	}
+}
+
+// preflightFilter checks each target's accessibility with one cheap request and
+// returns only the specs worth fully scanning. Targets that are private, missing
+// (dead host / no such bucket), or erroring are dropped, so a large list is not
+// spent crawling targets that cannot be read. The check itself runs concurrently
+// for speed.
+func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *options, out io.Writer) ([]urlSpec, error) {
+	verdicts := make([]app.Preflight, len(specs))
+	workers := resolveWorkers(opt.parallel, len(specs))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					verdicts[i] = app.Preflight{URL: specs[i].URL, Err: err}
+					continue
+				}
+				verdicts[i] = a.PreflightAccess(ctx, specs[i].URL)
+			}
+		}()
+	}
+	for i := range specs {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	kept := make([]urlSpec, 0, len(specs))
+	var public, denied, missing, errored int
+	for i, v := range verdicts {
+		switch {
+		case v.Accessible():
+			public++
+			kept = append(kept, specs[i])
+		case v.Access == bucket.AccessDenied:
+			denied++
+		case v.Access == bucket.AccessMissing:
+			missing++
+		default:
+			errored++
+		}
+	}
+	if !opt.quiet && !opt.json {
+		fmt.Fprintf(out, "Preflight: %d accessible, %d private, %d missing, %d errored",
+			public, denied, missing, errored)
+		fmt.Fprintf(out, " -> scanning %d of %d\n", len(kept), len(specs))
+	}
+	return kept, nil
+}

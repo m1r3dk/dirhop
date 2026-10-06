@@ -213,3 +213,68 @@ func TestScanParallelIndexesAllInOrder(t *testing.T) {
 		t.Fatalf("not all sessions persisted:\n%s", sessions)
 	}
 }
+
+// --preflight must emit a summary, keep reachable non-bucket (HTML) URLs, and
+// skip unreachable generic URLs before the expensive scan. Bucket-hostname
+// classification is covered by bucket.TestCheckAccess*.
+func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pub/" {
+			fmt.Fprint(w, `<title>Index of /pub</title><a href="a.zip">a.zip</a>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+	list := filepath.Join(tmp, "urls.txt")
+	_ = os.WriteFile(list, []byte(server.URL+"/pub/\n"+closedURL+"/dead/\n"), 0o600)
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	out, err := run("scan", "-f", list, "--preflight", "--parallel", "0")
+	if err != nil {
+		t.Fatalf("preflight scan with a dead generic URL failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Preflight: 1 accessible") || !strings.Contains(out, "1 errored") || !strings.Contains(out, "scanning 1 of 2") {
+		t.Fatalf("expected a preflight summary line, got:\n%s", out)
+	}
+	// The reachable non-bucket HTML listing was kept and actually indexed, while
+	// the closed generic URL was not allowed to fail the scan batch.
+	if ls, err := run("sessions"); err != nil || !strings.Contains(ls, "127.0.0.1") {
+		t.Fatalf("HTML listing was not indexed after preflight: %v\n%s", err, ls)
+	}
+}
+
+func TestResolveWorkers(t *testing.T) {
+	cases := []struct{ parallel, sites, want int }{
+		{0, 0, 1},    // nothing to do
+		{0, 5, 5},    // auto scales to small workloads
+		{0, 500, 64}, // auto capped at 64
+		{1, 10, 1},   // explicit serial
+		{8, 3, 3},    // never more workers than sites
+		{32, 100, 32},
+		{10000, 100, 100}, // explicit over hard cap, still clamped to sites
+	}
+	for _, tc := range cases {
+		if got := resolveWorkers(tc.parallel, tc.sites); got != tc.want {
+			t.Errorf("resolveWorkers(%d, %d) = %d, want %d", tc.parallel, tc.sites, got, tc.want)
+		}
+	}
+}

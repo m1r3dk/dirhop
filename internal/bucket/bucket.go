@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -210,6 +211,107 @@ type Doer interface {
 // buckets never sit in memory at once.
 func List(ctx context.Context, client Doer, t Target, userAgent string, page func([]Object) error) (pages int, err error) {
 	return rangeLister(t)(ctx, client, t, task{prefix: t.Prefix}, userAgent, func(objs []Object, _ []string, _ string, _ bool) error { return page(objs) })
+}
+
+// Access is the outcome of a preflight accessibility check.
+type Access int
+
+const (
+	// AccessPublic means the bucket answered an anonymous listing request, so a
+	// full scan can proceed.
+	AccessPublic Access = iota
+	// AccessDenied means the bucket exists but refuses anonymous listing
+	// (private, or object-only public access).
+	AccessDenied
+	// AccessMissing means the host or bucket does not exist (DNS failure or a
+	// definitive not-found from the store).
+	AccessMissing
+	// AccessError means the check could not reach a verdict (timeout, transport
+	// error, or an unexpected status); the caller may still try a full scan.
+	AccessError
+)
+
+func (a Access) String() string {
+	switch a {
+	case AccessPublic:
+		return "public"
+	case AccessDenied:
+		return "denied"
+	case AccessMissing:
+		return "missing"
+	default:
+		return "error"
+	}
+}
+
+// CheckAccess issues a single, minimal listing request (max 1 key) to classify
+// whether a bucket is publicly listable right now. It is the cheap preflight
+// used to filter a large list before committing to full scans: one round trip
+// per bucket instead of a full crawl, and dead hosts fail fast on their own
+// timeout. The HTTP client's own timeout bounds how long a slow host can block.
+func CheckAccess(ctx context.Context, client Doer, t Target, userAgent string) (Access, error) {
+	u := *t.Endpoint
+	q := url.Values{}
+	if t.Provider == Azure {
+		q.Set("restype", "container")
+		q.Set("comp", "list")
+		q.Set("maxresults", "1")
+	} else {
+		q.Set("list-type", "2")
+		q.Set("max-keys", "1")
+	}
+	if t.Prefix != "" {
+		q.Set("prefix", t.Prefix)
+	}
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return AccessError, err
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	if t.Provider == Azure {
+		req.Header.Set("x-ms-version", azureAPIVersion)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Transport-level failure. A DNS "no such host" is a definitive miss;
+		// anything else (timeout, reset) is an inconclusive error.
+		if isNoSuchHost(err) {
+			return AccessMissing, err
+		}
+		return AccessError, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+	}()
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return AccessPublic, nil
+	case resp.StatusCode == http.StatusForbidden:
+		return AccessDenied, nil
+	case resp.StatusCode == http.StatusNotFound:
+		// S3 returns 404 NoSuchBucket for a missing bucket, but Azure returns
+		// 404 for a private container too. Treat 404 as missing for S3-style and
+		// denied for Azure, matching how the full crawl classifies them.
+		if t.Provider == Azure {
+			return AccessDenied, nil
+		}
+		return AccessMissing, nil
+	default:
+		return AccessError, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+}
+
+// isNoSuchHost reports whether err is a DNS "no such host" lookup failure.
+func isNoSuchHost(err error) bool {
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return dns.IsNotFound
+	}
+	return false
 }
 
 // rangeLister selects the paging implementation for the target's provider. S3,

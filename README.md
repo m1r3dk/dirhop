@@ -54,11 +54,19 @@ dirhop scan https://a.example/ https://b.example/
 
 Duplicate URLs are skipped. One failing site does not stop the others; the exit code reflects the first failure. `--json` prints a per-URL result list.
 
-For large lists (thousands of buckets), index many sites concurrently with `--parallel/-p N`. Most of a single bucket's wall-clock time is network latency (and dead hosts time out), so overlapping them is dramatically faster: on one 24-host sample, `--parallel 24` ran ~28x faster than the default serial scan. Results stay in input order and SQLite writes are serialized internally, so the index never corrupts.
+For large lists (thousands of buckets), index many sites concurrently with `--parallel/-p N`. Most of a single bucket's wall-clock time is network latency (and dead hosts time out), so overlapping them is dramatically faster: on one 24-host sample, `--parallel 24` ran ~28x faster than the default serial scan. Use `--parallel 0` for an automatic worker count that scales with the list. Results stay in input order and SQLite writes are serialized internally, so the index never corrupts.
 
 ```sh
 dirhop scan -f buckets.txt --parallel 32        # index 32 buckets at once
+dirhop scan -f buckets.txt --parallel 0         # auto-scale concurrency
 dirhop ghw backups --urls | dirhop scan -f - -p 32
+```
+
+With a big list, many targets may be private, deleted, or on dead hosts by the time you scan. `--preflight` issues one cheap accessibility request first (a max-1 listing request for recognized buckets, or HEAD/tiny GET for ordinary HTTP listings), then scans only the targets that are reachable and publicly listable right now, skipping private/missing/dead/error targets. On a 15-dead-host sample it finished the check and skipped everything in under 2 seconds instead of waiting on 15 full crawls.
+
+```sh
+dirhop scan -f buckets.txt --preflight --parallel 0
+# Preflight: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128 of 400
 ```
 
 ```sh
@@ -103,7 +111,7 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 | `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after` |
 | `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
 | `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
-| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p` |
+| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight` |
 | `ghw` | `--files`, `--type/-t`, `--ext/-e`, `--limit/-l`, `--order`, `--direction`, `--full-path`, `--scan`, `--urls` |
 | `refresh` | `--full/-f`, `--metadata/-m` |
 | `errors`, `downloads` | `--limit/-l` |

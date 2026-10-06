@@ -43,14 +43,28 @@ list.
 
 ### Go faster on large lists
 
-Index many sites at once with `--parallel/-p N`. Most of a bucket's time is
-network latency (dead hosts time out), so overlapping them is dramatically
-faster: on one 24-host sample, `--parallel 24` ran ~28x faster than the serial
-default. Results stay in input order and the SQLite index stays consistent
-because writes are serialized internally.
+Index many sites at once with `--parallel/-p N`. Use `--parallel 0` to let
+dirhop auto-pick a high-throughput worker count for big bucket lists. Most of a
+bucket's time is network latency (dead hosts time out), so overlapping them is
+dramatically faster: on one 24-host sample, `--parallel 24` ran ~28x faster than
+the serial default. Results stay in input order and the SQLite index stays
+consistent because writes are serialized internally.
 
 ```sh
 dirhop scan -f targets.txt --parallel 32
+dirhop scan -f buckets_aws.txt --parallel 0
+```
+
+### Skip private or missing buckets first
+
+For huge target lists, run a cheap preflight before indexing. `--preflight`
+sends one minimal listing request per recognized bucket, or HEAD/tiny GET for
+ordinary HTTP listings, skips private/missing/error targets, and then scans only
+the accessible targets.
+
+```sh
+dirhop scan -f buckets.txt --preflight --parallel 0
+# Preflight: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128 of 400
 ```
 
 ## Browse, search, download

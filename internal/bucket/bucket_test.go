@@ -81,6 +81,57 @@ func TestListPaginatesWithContinuationToken(t *testing.T) {
 	}
 }
 
+func TestCheckAccessClassifies(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		provider Provider
+		want     Access
+	}{
+		{"public", http.StatusOK, S3, AccessPublic},
+		{"denied", http.StatusForbidden, S3, AccessDenied},
+		{"missing s3", http.StatusNotFound, S3, AccessMissing},
+		{"denied azure 404", http.StatusNotFound, Azure, AccessDenied},
+		{"unexpected", http.StatusInternalServerError, S3, AccessError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawMaxKeys, sawAzure bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sawMaxKeys = r.URL.Query().Get("max-keys") == "1" || r.URL.Query().Get("maxresults") == "1"
+				sawAzure = r.URL.Query().Get("comp") == "list"
+				if tc.status == http.StatusOK {
+					fmt.Fprint(w, `<ListBucketResult></ListBucketResult>`)
+					return
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			endpoint, _ := url.Parse(server.URL + "/")
+			got, _ := CheckAccess(context.Background(), server.Client(), Target{Provider: tc.provider, Endpoint: endpoint}, "ua")
+			if got != tc.want {
+				t.Fatalf("CheckAccess = %v, want %v", got, tc.want)
+			}
+			if !sawMaxKeys {
+				t.Error("preflight did not send a max-1 listing bound")
+			}
+			if tc.provider == Azure && !sawAzure {
+				t.Error("azure preflight did not send comp=list")
+			}
+		})
+	}
+}
+
+// A dead host (DNS failure) must classify as missing, not a generic error, so
+// preflight can drop it with confidence.
+func TestCheckAccessDeadHostIsMissing(t *testing.T) {
+	endpoint, _ := url.Parse("https://dirhop-nonexistent-host.invalid/")
+	got, err := CheckAccess(context.Background(), &http.Client{Timeout: 5 * time.Second}, Target{Provider: S3, Endpoint: endpoint}, "ua")
+	if got != AccessMissing {
+		t.Fatalf("CheckAccess = %v (err=%v), want missing", got, err)
+	}
+}
+
 func TestListAccessDenied(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

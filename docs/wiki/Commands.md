@@ -43,7 +43,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 
 ## Index
 
-- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p` (full rescan)
+- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight` (full rescan, `--parallel 0` auto-scales workers)
 - `refresh` - `--full/-f`, `--metadata/-m`
 - `errors`, `downloads` - `--limit/-l`
 - `info`
@@ -57,6 +57,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 ## Examples
 
 ```sh
+dirhop scan -f buckets.txt --preflight --parallel 0
 dirhop -s mirror find --ext iso --json
 dirhop -s mirror urls --files-only | grep ubuntu
 dirhop -s backups du /database
