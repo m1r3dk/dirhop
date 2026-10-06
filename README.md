@@ -62,11 +62,32 @@ dirhop scan -f buckets.txt --parallel 0         # auto-scale concurrency
 dirhop ghw backups --urls | dirhop scan -f - -p 32
 ```
 
-With a big list, many targets may be private, deleted, or on dead hosts by the time you scan. `--preflight` issues one cheap accessibility request first (a max-1 listing request for recognized buckets, or HEAD/tiny GET for ordinary HTTP listings), then scans only the targets that are reachable and publicly listable right now, skipping private/missing/dead/error targets. On a 15-dead-host sample it finished the check and skipped everything in under 2 seconds instead of waiting on 15 full crawls.
+With a big list, many targets may be private, deleted, or on dead hosts by the time you scan. Multi-target scans now run preflight automatically. `--preflight` issues one cheap accessibility request first (a max-1 listing request for recognized buckets, or HEAD/tiny GET for ordinary HTTP listings), then scans only the targets that are reachable and publicly listable right now, skipping private/missing/dead/error targets. Use `--no-preflight` if you explicitly want to try every target anyway. On a 15-dead-host sample it finished the check and skipped everything in under 2 seconds instead of waiting on 15 full crawls.
 
 ```sh
 dirhop scan -f buckets.txt --preflight --parallel 0
-# Preflight: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128 of 400
+# Preflight summary: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128/400
+```
+
+Re-running the same list is cheap: buckets that already completed are skipped
+(no re-crawl), and only failed, cancelled, or never-finished ones are retried.
+Pass `--rescan` to force a fresh crawl of everything. Failed buckets stay in the
+index so you can review and re-run them:
+
+```sh
+dirhop scan -f buckets.txt            # second run skips completed buckets
+dirhop scan -f buckets.txt --rescan   # force re-crawl of everything
+dirhop sessions --status failed       # list buckets that could not be scanned
+```
+
+Deletions are tracked across scans. When a rescan no longer sees a file that was
+there before, it is kept (soft-deleted) with its last-seen size and timestamp
+rather than purged, and `changes` lists what disappeared:
+
+```sh
+dirhop -s example-com changes
+# TYPE  SIZE     LAST SEEN         PATH
+# file  4.3 MiB  2026-01-02 15:04  /releases/old.iso
 ```
 
 ```sh
@@ -95,7 +116,7 @@ example-com:/releases > exit
 - Search: `find`, `search`, `urls`
 - Discovery: `ghw` (search public buckets via GrayHatWarfare)
 - Transfer: `download`
-- Index: `refresh`, `errors`, `info`
+- Index: `refresh`, `errors`, `changes`, `info`
 - Sessions: `sessions`, `session list|use|info|rename|delete|refresh`, shell `use`
 
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
@@ -111,7 +132,7 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 | `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after` |
 | `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
 | `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
-| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight` |
+| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight`, `--rescan` |
 | `ghw` | `--files`, `--type/-t`, `--ext/-e`, `--limit/-l`, `--order`, `--direction`, `--full-path`, `--scan`, `--urls` |
 | `refresh` | `--full/-f`, `--metadata/-m` |
 | `errors`, `downloads` | `--limit/-l` |

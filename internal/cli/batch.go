@@ -12,6 +12,7 @@ import (
 
 	"github.com/m1r3dk/dirhop/internal/app"
 	"github.com/m1r3dk/dirhop/internal/bucket"
+	"github.com/m1r3dk/dirhop/internal/model"
 	"github.com/m1r3dk/dirhop/internal/output"
 	"github.com/m1r3dk/dirhop/internal/session"
 )
@@ -108,6 +109,7 @@ type batchResult struct {
 	URL     string `json:"url"`
 	Session string `json:"session,omitempty"`
 	Created bool   `json:"created"`
+	Skipped bool   `json:"skipped,omitempty"`
 	Files   int64  `json:"files"`
 	Bytes   int64  `json:"bytes"`
 	Error   string `json:"error,omitempty"`
@@ -140,12 +142,34 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 	results := make([]batchResult, len(specs))
 	errs := make([]error, len(specs))
 	single := len(specs) == 1
+	if !single {
+		// Per-crawl progress uses carriage returns. During a batch, several crawls
+		// can update it while result lines are printed, which makes output look like
+		// "Directories... [202/33820] Indexed..." on one line. Batch scans already
+		// have [done/total] result lines, so keep that as the only progress signal.
+		savedProgress := a.Progress
+		a.Progress = nil
+		defer func() { a.Progress = savedProgress }()
+	}
 
 	// indexOne runs the full open/crawl/enrich pipeline for one spec and returns
 	// its result plus the typed error (kept so exit codes stay meaningful). It
 	// never changes the active session during a batch.
 	indexOne := func(spec urlSpec) (batchResult, error) {
 		res := batchResult{URL: spec.URL}
+		// A bucket that already completed successfully is not re-crawled unless the
+		// caller forces it with --rescan. Existing sessions that failed, were
+		// cancelled, or never finished are retried so a big list can be run again
+		// to pick up only the ones that still need work.
+		existing, lookupErr := a.DB.SiteByCanonicalURL(ctx, canonicalOrRaw(spec.URL))
+		if lookupErr == nil && existing.ScanStatus == model.ScanStatusComplete && !opt.forceRescan {
+			res.Session, res.Files, res.Bytes = existing.Name, existing.FileCount, existing.TotalSize
+			res.Skipped = true
+			if single {
+				_ = a.DB.SetActiveSite(ctx, existing.ID)
+			}
+			return res, nil
+		}
 		site, created, err := a.OpenURL(ctx, spec.URL, spec.Name, single)
 		if err == nil && !created && rescan {
 			err = a.Crawl(ctx, site, true)
@@ -185,6 +209,8 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		switch {
 		case res.Error != "":
 			fmt.Fprintf(out, "%sFAILED %s: %s\n", prefix, spec.URL, res.Error)
+		case res.Skipped:
+			fmt.Fprintf(out, "%sSkipped %s: already scanned, %d files, %s (use --rescan to re-crawl)\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
 		case !res.Created && !rescan:
 			fmt.Fprintf(out, "%sExisting %s: %d files, %s (use `scan` to re-crawl)\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
 		default:
@@ -227,12 +253,16 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 
 	var firstErr error
 	failed := 0
+	skipped := 0
 	for i, r := range results {
-		if r.Error != "" {
+		switch {
+		case r.Error != "":
 			failed++
 			if firstErr == nil {
 				firstErr = errs[i]
 			}
+		case r.Skipped:
+			skipped++
 		}
 	}
 	if opt.json {
@@ -240,7 +270,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 			return err
 		}
 	} else if !opt.quiet && len(specs) > 1 {
-		fmt.Fprintf(out, "Done: %d indexed, %d failed\n", len(specs)-failed, failed)
+		fmt.Fprintf(out, "Done: %d indexed, %d skipped, %d failed\n", len(specs)-failed-skipped, skipped, failed)
 	}
 	if firstErr == nil {
 		return nil
@@ -257,6 +287,16 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 type quietError struct{ error }
 
 func (q quietError) Unwrap() error { return q.error }
+
+// canonicalOrRaw returns the canonical form of a URL for a DB lookup, falling
+// back to the raw URL when canonicalization fails (the later open will surface
+// the real error).
+func canonicalOrRaw(raw string) string {
+	if c, err := session.CanonicalURL(raw); err == nil {
+		return c
+	}
+	return raw
+}
 
 // resolveWorkers turns the --parallel value into a worker count. 0 means auto:
 // scale with the workload up to a sane cap, since indexing is network-bound and
@@ -290,8 +330,25 @@ func resolveWorkers(parallel, sites int) int {
 // spent crawling targets that cannot be read. The check itself runs concurrently
 // for speed.
 func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *options, out io.Writer) ([]urlSpec, error) {
-	verdicts := make([]app.Preflight, len(specs))
-	workers := resolveWorkers(opt.parallel, len(specs))
+	// Buckets that already completed are kept without a network request: indexOne
+	// skips them cheaply unless --rescan is set. This keeps re-running a large
+	// list fast and avoids re-probing everything already indexed.
+	var toCheck []urlSpec
+	var alreadyDone []urlSpec
+	for _, s := range specs {
+		if !opt.forceRescan {
+			if site, err := a.DB.SiteByCanonicalURL(ctx, canonicalOrRaw(s.URL)); err == nil && site.ScanStatus == model.ScanStatusComplete {
+				alreadyDone = append(alreadyDone, s)
+				continue
+			}
+		}
+		toCheck = append(toCheck, s)
+	}
+	verdicts := make([]app.Preflight, len(toCheck))
+	workers := resolveWorkers(opt.parallel, len(toCheck))
+	if !opt.quiet && !opt.json {
+		fmt.Fprintf(out, "Preflight: checking %d targets with %d workers (%d already scanned)...\n", len(toCheck), workers, len(alreadyDone))
+	}
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for range workers {
@@ -300,14 +357,14 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 			defer wg.Done()
 			for i := range jobs {
 				if err := ctx.Err(); err != nil {
-					verdicts[i] = app.Preflight{URL: specs[i].URL, Err: err}
+					verdicts[i] = app.Preflight{URL: toCheck[i].URL, Err: err}
 					continue
 				}
-				verdicts[i] = a.PreflightAccess(ctx, specs[i].URL)
+				verdicts[i] = a.PreflightAccess(ctx, toCheck[i].URL)
 			}
 		}()
 	}
-	for i := range specs {
+	for i := range toCheck {
 		jobs <- i
 	}
 	close(jobs)
@@ -317,12 +374,13 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 	}
 
 	kept := make([]urlSpec, 0, len(specs))
+	kept = append(kept, alreadyDone...)
 	var public, denied, missing, errored int
 	for i, v := range verdicts {
 		switch {
 		case v.Accessible():
 			public++
-			kept = append(kept, specs[i])
+			kept = append(kept, toCheck[i])
 		case v.Access == bucket.AccessDenied:
 			denied++
 		case v.Access == bucket.AccessMissing:
@@ -332,9 +390,9 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 		}
 	}
 	if !opt.quiet && !opt.json {
-		fmt.Fprintf(out, "Preflight: %d accessible, %d private, %d missing, %d errored",
+		fmt.Fprintf(out, "Preflight summary: %d accessible, %d private, %d missing, %d errored",
 			public, denied, missing, errored)
-		fmt.Fprintf(out, " -> scanning %d of %d\n", len(kept), len(specs))
+		fmt.Fprintf(out, " -> scanning %d/%d\n", len(kept), len(specs))
 	}
 	return kept, nil
 }

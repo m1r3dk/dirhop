@@ -25,17 +25,19 @@ import (
 )
 
 type options struct {
-	session   string
-	url       string
-	name      string
-	config    string
-	parallel  int
-	preflight bool
-	json      bool
-	quiet     bool
-	noColor   bool
-	verbose   bool
-	debug     bool
+	session     string
+	url         string
+	name        string
+	config      string
+	parallel    int
+	preflight   bool
+	noPreflight bool
+	forceRescan bool
+	json        bool
+	quiet       bool
+	noColor     bool
+	verbose     bool
+	debug       bool
 }
 
 func Execute() error {
@@ -189,6 +191,7 @@ func addCommands(root *cobra.Command, a *app.App, opt *options, out io.Writer) {
 	root.AddCommand(newFind(a, opt, out), newSearch(a, opt, out), newURLs(a, opt, out))
 	root.AddCommand(newDownload(a, opt, out), newRefresh(a, opt, out))
 	root.AddCommand(newInfo(a, opt, out), newErrors(a, opt, out))
+	root.AddCommand(newChanges(a, opt, out))
 	root.AddCommand(newSessions(a, opt, out), newSession(a, opt, out))
 	root.AddCommand(newConfig(a, out))
 	root.AddCommand(newDownloads(a, opt, out))
@@ -239,22 +242,33 @@ ignored, and an optional second field names the session:
   gxbackup.blob.core.windows.net/documents   azureblob
   # https://skipped.example.com/
 
-Sites are indexed one after another; a failure does not stop the rest.`,
-		Example: "  dirhop scan -f urls.txt\n  dirhop scan https://a.example/ https://b.example/\n  cat urls.txt | dirhop scan -f - --json",
+	Sites are indexed concurrently. Multi-target scans run a preflight check by
+	default so private, missing, dead-host, and erroring targets are skipped before
+	the expensive crawl.`,
+		Example: "  dirhop scan -f urls.txt\n  dirhop scan -f buckets.txt --parallel 0\n  dirhop scan https://a.example/ https://b.example/ --no-preflight\n  cat urls.txt | dirhop scan -f - --json",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validMetadata(metadata); err != nil {
 				return err
+			}
+			if opt.preflight && opt.noPreflight {
+				return fmt.Errorf("%w: --preflight and --no-preflight are mutually exclusive", ErrInvalidArguments)
 			}
 			specs, err := collectURLs(args, file, opt.name, cmd.InOrStdin())
 			if err != nil {
 				return err
 			}
-			return indexURLs(cmd.Context(), a, specs, true, metadata, opt, out)
+			scanOpt := *opt
+			if len(specs) > 1 && !scanOpt.noPreflight {
+				scanOpt.preflight = true
+			}
+			return indexURLs(cmd.Context(), a, specs, true, metadata, &scanOpt, out)
 		}}
 	cmd.Flags().StringVarP(&metadata, "metadata", "m", metadata, "minimal, normal (listing metadata), or full (adds one HEAD per file)")
 	cmd.Flags().StringVarP(&file, "file", "f", "", "read URLs from FILE, one per line (- for stdin)")
 	cmd.Flags().IntVarP(&opt.parallel, "parallel", "p", opt.parallel, "index this many sites concurrently (0 = auto; useful for large bucket lists)")
-	cmd.Flags().BoolVar(&opt.preflight, "preflight", false, "check accessibility first and skip buckets that are private or missing")
+	cmd.Flags().BoolVar(&opt.preflight, "preflight", false, "check accessibility first and skip private, missing, or erroring targets")
+	cmd.Flags().BoolVar(&opt.noPreflight, "no-preflight", false, "disable the automatic preflight check for multi-target scans")
+	cmd.Flags().BoolVar(&opt.forceRescan, "rescan", false, "re-crawl buckets that were already scanned successfully (default skips them)")
 	return cmd
 }
 
@@ -885,6 +899,38 @@ func newInfo(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	}}
 }
 
+func newChanges(a *app.App, opt *options, out io.Writer) *cobra.Command {
+	var limit int
+	cmd := &cobra.Command{Use: "changes", Short: "Show files that disappeared since the last successful scan", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		site, err := selected(cmd.Context(), a, opt)
+		if err != nil {
+			return err
+		}
+		items, err := a.DB.RemovedEntries(cmd.Context(), site.ID, limit)
+		if err != nil {
+			return err
+		}
+		if opt.json {
+			return output.JSON(out, items)
+		}
+		if len(items) == 0 {
+			if !opt.quiet {
+				fmt.Fprintln(out, "No removed files since the last successful scan.")
+			}
+			return nil
+		}
+		w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+		defer w.Flush()
+		fmt.Fprintln(w, "TYPE\tSIZE\tLAST SEEN\tPATH")
+		for _, e := range items {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.Type, output.Size(sizeOf(e)), e.LastSeenAt.Local().Format("2006-01-02 15:04"), e.NormalizedPath)
+		}
+		return nil
+	}}
+	cmd.Flags().IntVarP(&limit, "limit", "l", 0, "maximum records (0 = all)")
+	return cmd
+}
+
 func newErrors(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	var limit int
 	cmd := &cobra.Command{Use: "errors", Short: "Show crawl errors for the selected session", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -909,12 +955,22 @@ func newErrors(a *app.App, opt *options, out io.Writer) *cobra.Command {
 }
 
 func newSessions(a *app.App, opt *options, out io.Writer) *cobra.Command {
-	return &cobra.Command{Use: "sessions", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }}
+	var status string
+	cmd := &cobra.Command{Use: "sessions", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return printSessions(cmd.Context(), a, opt, out, status)
+	}}
+	cmd.Flags().StringVar(&status, "status", "", "only show sessions with this scan status (complete, failed, pending, running, cancelled)")
+	return cmd
 }
 
 func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	group := &cobra.Command{Use: "session", Short: "Manage persistent sessions"}
-	group.AddCommand(&cobra.Command{Use: "list", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return printSessions(cmd.Context(), a, opt, out) }})
+	var listStatus string
+	listCmd := &cobra.Command{Use: "list", Short: "List persistent sessions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return printSessions(cmd.Context(), a, opt, out, listStatus)
+	}}
+	listCmd.Flags().StringVar(&listStatus, "status", "", "only show sessions with this scan status (complete, failed, pending, running, cancelled)")
+	group.AddCommand(listCmd)
 	group.AddCommand(&cobra.Command{Use: "use <name>", Short: "Set the active session", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := a.Site(cmd.Context(), args[0]); err != nil {
 			return err
@@ -975,10 +1031,20 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	return group
 }
 
-func printSessions(ctx context.Context, a *app.App, opt *options, out io.Writer) error {
+func printSessions(ctx context.Context, a *app.App, opt *options, out io.Writer, status string) error {
 	sites, err := a.Sessions.List(ctx)
 	if err != nil {
 		return err
+	}
+	if status != "" {
+		want := model.ScanStatus(strings.ToLower(strings.TrimSpace(status)))
+		filtered := sites[:0]
+		for _, s := range sites {
+			if s.ScanStatus == want {
+				filtered = append(filtered, s)
+			}
+		}
+		sites = filtered
 	}
 	var activeID int64
 	if active, e := a.Sessions.Active(ctx); e == nil {
@@ -989,13 +1055,13 @@ func printSessions(ctx context.Context, a *app.App, opt *options, out io.Writer)
 	}
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	defer w.Flush()
-	fmt.Fprintln(w, "\tNAME\tHOST\tFILES\tSIZE\tLAST SCAN")
+	fmt.Fprintln(w, "\tNAME\tHOST\tFILES\tSIZE\tSTATUS\tLAST SCAN")
 	for _, s := range sites {
 		mark := " "
 		if s.ID == activeID {
 			mark = "*"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", mark, s.Name, s.Hostname, s.FileCount, output.Size(s.TotalSize), formatTime(s.LastCrawledAt))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", mark, s.Name, s.Hostname, s.FileCount, output.Size(s.TotalSize), s.ScanStatus, formatTime(s.LastCrawledAt))
 	}
 	return nil
 }

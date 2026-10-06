@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -126,7 +127,7 @@ func TestScanFromFileIndexesAllAndContinuesPastFailures(t *testing.T) {
 		return out.String(), err
 	}
 
-	out, err := run("scan", "-f", list, "--json")
+	out, err := run("scan", "-f", list, "--json", "--no-preflight")
 	if ExitCode(err) != 5 {
 		t.Fatalf("want network-failure exit 5 for the 404 site, got %v\n%s", err, out)
 	}
@@ -252,13 +253,124 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preflight scan with a dead generic URL failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Preflight: 1 accessible") || !strings.Contains(out, "1 errored") || !strings.Contains(out, "scanning 1 of 2") {
+	if !strings.Contains(out, "Preflight summary: 1 accessible") || !strings.Contains(out, "1 errored") || !strings.Contains(out, "scanning 1/2") {
 		t.Fatalf("expected a preflight summary line, got:\n%s", out)
 	}
 	// The reachable non-bucket HTML listing was kept and actually indexed, while
 	// the closed generic URL was not allowed to fail the scan batch.
 	if ls, err := run("sessions"); err != nil || !strings.Contains(ls, "127.0.0.1") {
 		t.Fatalf("HTML listing was not indexed after preflight: %v\n%s", err, ls)
+	}
+}
+
+// A second scan of a list that already completed must skip the finished sites
+// (no re-crawl) unless --rescan is passed, and must still report them.
+func TestScanSkipsAlreadyScannedUnlessRescan(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		name := strings.Trim(r.URL.Path, "/")
+		fmt.Fprintf(w, `<title>Index of /%s</title><a href="%s.bin">%s.bin</a>`, name, name, name)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+	list := filepath.Join(tmp, "urls.txt")
+	_ = os.WriteFile(list, []byte(server.URL+"/one/\n"+server.URL+"/two/\n"), 0o600)
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	if _, err := run("scan", "-f", list, "--no-preflight"); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	first := atomic.LoadInt32(&hits)
+	if first == 0 {
+		t.Fatal("first scan made no requests")
+	}
+
+	out, err := run("scan", "-f", list, "--no-preflight")
+	if err != nil {
+		t.Fatalf("second scan: %v\n%s", err, out)
+	}
+	if atomic.LoadInt32(&hits) != first {
+		t.Fatalf("second scan re-crawled already-complete sites: hits went %d -> %d", first, atomic.LoadInt32(&hits))
+	}
+	if !strings.Contains(out, "Skipped") || !strings.Contains(out, "0 indexed, 2 skipped") {
+		t.Fatalf("expected skip summary, got:\n%s", out)
+	}
+
+	if _, err := run("scan", "-f", list, "--no-preflight", "--rescan"); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if atomic.LoadInt32(&hits) <= first {
+		t.Fatalf("--rescan did not re-crawl: hits stayed at %d", atomic.LoadInt32(&hits))
+	}
+}
+
+// After a file is removed from a listing, a full rescan soft-deletes it and the
+// changes command surfaces it with its last-seen size.
+func TestChangesListsRemovedFiles(t *testing.T) {
+	var drop atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pub/" {
+			http.NotFound(w, r)
+			return
+		}
+		if drop.Load() {
+			fmt.Fprint(w, `<title>Index of /pub</title><a href="keep.bin">keep.bin</a>`)
+			return
+		}
+		fmt.Fprint(w, `<title>Index of /pub</title><a href="keep.bin">keep.bin</a><a href="gone.bin">gone.bin</a>`)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	if _, err := run("scan", server.URL+"/pub/"); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	drop.Store(true)
+	if _, err := run("refresh", "-s", "127-0-0-1-pub", "--full"); err != nil {
+		// Session name is host-derived; fall back to active session.
+		if _, err2 := run("refresh", "--full"); err2 != nil {
+			t.Fatalf("refresh after deletion: %v / %v", err, err2)
+		}
+	}
+	out, err := run("changes")
+	if err != nil {
+		t.Fatalf("changes: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "gone.bin") {
+		t.Fatalf("changes did not report the removed file:\n%s", out)
+	}
+	if strings.Contains(out, "keep.bin") {
+		t.Fatalf("changes wrongly reported a still-present file:\n%s", out)
 	}
 }
 

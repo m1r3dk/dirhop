@@ -43,14 +43,17 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 
 ## Index
 
-- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight` (full rescan, `--parallel 0` auto-scales workers)
+- `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight` (full rescan, multi-target scans preflight automatically, `--parallel 0` auto-scales workers)
+- `scan` also takes `--rescan` to re-crawl buckets that already completed (default skips them)
 - `refresh` - `--full/-f`, `--metadata/-m`
 - `errors`, `downloads` - `--limit/-l`
+- `changes` - `--limit/-l` (files removed since the last successful scan)
 - `info`
 
 ## Sessions
 
 - `sessions`, `session list|use|info|rename|delete|refresh`
+- `sessions --status complete|failed|pending|running|cancelled` filters by scan status
 - `session delete` - `--yes/-y`
 - shell `use <name|number>` to switch the active session
 

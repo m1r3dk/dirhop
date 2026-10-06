@@ -57,14 +57,15 @@ dirhop scan -f buckets_aws.txt --parallel 0
 
 ### Skip private or missing buckets first
 
-For huge target lists, run a cheap preflight before indexing. `--preflight`
-sends one minimal listing request per recognized bucket, or HEAD/tiny GET for
-ordinary HTTP listings, skips private/missing/error targets, and then scans only
-the accessible targets.
+For huge target lists, dirhop runs a cheap preflight automatically before
+indexing. `--preflight` sends one minimal listing request per recognized bucket,
+or HEAD/tiny GET for ordinary HTTP listings, skips private/missing/error targets,
+and then scans only the accessible targets. Use `--no-preflight` to force trying
+every target anyway.
 
 ```sh
 dirhop scan -f buckets.txt --preflight --parallel 0
-# Preflight: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128 of 400
+# Preflight summary: 128 accessible, 54 private, 210 missing, 8 errored -> scanning 128/400
 ```
 
 ## Browse, search, download

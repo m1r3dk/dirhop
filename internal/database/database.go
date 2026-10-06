@@ -317,11 +317,30 @@ func (d *DB) EntriesUnder(ctx context.Context, siteID int64, root string, includ
 	return out, err
 }
 
+// RemovedEntries returns entries that were present in an earlier scan but were
+// not seen in the most recent complete scan (soft-deleted). Newest removal
+// first. A limit <= 0 means no limit.
+func (d *DB) RemovedEntries(ctx context.Context, siteID int64, limit int) ([]model.Entry, error) {
+	q := `SELECT ` + entryColumns + ` FROM entries WHERE site_id=? AND removed=1 AND normalized_path<>'/' ORDER BY updated_at DESC, normalized_path COLLATE NOCASE`
+	args := []any{siteID}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := d.sql.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntryRows(rows)
+}
+
 // EntryFilter is evaluated inside SQLite so large indexes are never loaded
 // wholesale into memory. Zero values mean no constraint.
 type EntryFilter struct {
 	IncludeRoot    bool
 	IncludeRemoved bool
+	OnlyRemoved    bool // when true, return only entries marked removed
 	Type           model.EntryType
 	NameGlob       string // SQLite GLOB on the base name
 	Substring      string // case-insensitive match on name or path
@@ -346,7 +365,10 @@ func subtreeWhere(siteID int64, root string, f EntryFilter) (string, []any) {
 	} else if !f.IncludeRoot {
 		where += ` AND normalized_path<>'/'`
 	}
-	if !f.IncludeRemoved {
+	switch {
+	case f.OnlyRemoved:
+		where += ` AND removed=1`
+	case !f.IncludeRemoved:
 		where += ` AND removed=0`
 	}
 	if f.Type != "" {

@@ -12,6 +12,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listings) and scans only targets that are reachable and publicly listable
   right now, skipping private, deleted, dead-host, and erroring targets. On a
   15-dead-host sample it finished and skipped all of them in under 2 seconds.
+- Multi-target `scan` runs preflight automatically and offers `--no-preflight`
+  when every target should be attempted regardless of the cheap check.
+- Re-running `scan` on a list skips buckets that already completed successfully
+  (no re-crawl); `--rescan` forces a fresh crawl. Failed, cancelled, and
+  never-finished sessions are retried, so a large list can be re-run to pick up
+  only the targets that still need work.
+- `sessions` now shows a STATUS column and accepts `--status complete|failed|
+  pending|running|cancelled`, so failed buckets are easy to find and re-run.
+- New `changes` command lists files that disappeared since the last successful
+  scan (soft-deleted, kept with their last-seen size and timestamp rather than
+  purged), so deletions between scans are detectable without hashing.
 - `scan --parallel/-p N` indexes many sites concurrently. For large bucket
   lists this is dramatically faster (most of each bucket's time is network
   latency); a 24-host sample ran ~28x faster than the serial default. Per-URL
