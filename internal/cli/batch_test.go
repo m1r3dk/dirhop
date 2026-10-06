@@ -12,6 +12,47 @@ import (
 	"testing"
 )
 
+func TestNormalizeURLPrependsScheme(t *testing.T) {
+	cases := map[string]string{
+		// Bare bucket hosts gain https:// so `dirhop scan <host>` just works.
+		"amazetest.storage.googleapis.com":         "https://amazetest.storage.googleapis.com",
+		"test-0528.oss-cn-shanghai.aliyuncs.com":   "https://test-0528.oss-cn-shanghai.aliyuncs.com",
+		"gxbackup.blob.core.windows.net/documents": "https://gxbackup.blob.core.windows.net/documents",
+		"b.s3.us-west-2.amazonaws.com/docs":        "https://b.s3.us-west-2.amazonaws.com/docs",
+		// Explicit schemes are preserved exactly.
+		"http://plain.example/pub/": "http://plain.example/pub/",
+		"https://secure.example/":   "https://secure.example/",
+		// Non-host inputs (typos, bare commands) are left unchanged so they
+		// still fail as "unknown command or URL" rather than "https://typo".
+		"not-a-url": "not-a-url",
+		"":          "",
+	}
+	for in, want := range cases {
+		if got := normalizeURL(in); got != want {
+			t.Errorf("normalizeURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCollectURLsNormalizesBareHosts(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "urls.txt")
+	content := "amazetest.storage.googleapis.com\n" +
+		"gxbackup.blob.core.windows.net/documents  azureblob\n"
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := collectURLs([]string{"b.s3.amazonaws.com"}, file, "", nil)
+	if err != nil {
+		t.Fatalf("collectURLs: %v", err)
+	}
+	if len(specs) != 3 ||
+		specs[0].URL != "https://b.s3.amazonaws.com" ||
+		specs[1].URL != "https://amazetest.storage.googleapis.com" ||
+		specs[2] != (urlSpec{"https://gxbackup.blob.core.windows.net/documents", "azureblob"}) {
+		t.Fatalf("specs = %+v", specs)
+	}
+}
+
 func TestReadURLFile(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "urls.txt")
 	content := "# my sites\n\nhttps://a.example/pub/   alpha\nhttps://b.example/  # trailing comment\n  https://A.EXAMPLE/pub   \n"

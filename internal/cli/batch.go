@@ -46,10 +46,11 @@ func readURLFile(path string, stdin io.Reader) ([]urlSpec, error) {
 		if len(fields) > 2 {
 			return nil, fmt.Errorf("%w: %s line %d: expected \"URL [name]\"", ErrInvalidArguments, path, n)
 		}
-		if !isHTTPURL(fields[0]) {
+		raw := normalizeURL(fields[0])
+		if !isHTTPURL(raw) {
 			return nil, fmt.Errorf("%w: %s line %d: not an HTTP/HTTPS URL: %s", ErrInvalidArguments, path, n, fields[0])
 		}
-		spec := urlSpec{URL: fields[0]}
+		spec := urlSpec{URL: raw}
 		if len(fields) == 2 {
 			spec.Name = fields[1]
 		}
@@ -63,10 +64,11 @@ func readURLFile(path string, stdin io.Reader) ([]urlSpec, error) {
 func collectURLs(args []string, file, name string, stdin io.Reader) ([]urlSpec, error) {
 	var specs []urlSpec
 	for _, a := range args {
-		if !isHTTPURL(a) {
+		raw := normalizeURL(a)
+		if !isHTTPURL(raw) {
 			return nil, fmt.Errorf("%w: not an HTTP/HTTPS URL: %s", ErrInvalidArguments, a)
 		}
-		specs = append(specs, urlSpec{URL: a})
+		specs = append(specs, urlSpec{URL: raw})
 	}
 	if file != "" {
 		fromFile, err := readURLFile(file, stdin)

@@ -106,10 +106,11 @@ run "download".`,
 				}
 				return cmd.Help()
 			}
-			if !isHTTPURL(args[0]) {
+			raw := normalizeURL(args[0])
+			if !isHTTPURL(raw) {
 				return fmt.Errorf("%w: unknown command or URL %q (run `dirhop --help`)", ErrInvalidArguments, args[0])
 			}
-			site, created, err := application.OpenURL(ctx, args[0], opt.name, true)
+			site, created, err := application.OpenURL(ctx, raw, opt.name, true)
 			if err != nil {
 				return err
 			}
@@ -227,11 +228,13 @@ func newScan(a *app.App, opt *options, out io.Writer) *cobra.Command {
 		Long: `Index one or more directory listings or buckets.
 
 URLs come from arguments and/or -f FILE (one per line; "-" reads stdin).
-In the file, blank lines and # comments are ignored, and an optional second
-field names the session:
+A bare host with no scheme is accepted and indexed over https, so bucket
+lists can be fed in as-is. In the file, blank lines and # comments are
+ignored, and an optional second field names the session:
 
   https://mirror.example.com/pub/   mirror
-  https://bucket.s3.amazonaws.com/
+  bucket.s3.amazonaws.com
+  gxbackup.blob.core.windows.net/documents   azureblob
   # https://skipped.example.com/
 
 Sites are indexed one after another; a failure does not stop the rest.`,
@@ -1038,6 +1041,31 @@ func formatTime(t *time.Time) string {
 }
 func isHTTPURL(s string) bool {
 	return strings.HasPrefix(strings.ToLower(s), "http://") || strings.HasPrefix(strings.ToLower(s), "https://")
+}
+
+// normalizeURL lets users pass a bare bucket or site host without a scheme, e.g.
+//
+//	dirhop scan amazetest.storage.googleapis.com
+//	dirhop scan gxbackup.blob.core.windows.net/documents
+//
+// A default https:// is prepended when the input has no scheme but looks like a
+// host (a dot appears before any '/', '?', or '#'). Inputs that already carry a
+// scheme (http://, https://, or anything with "://") are returned unchanged, as
+// are strings that do not look like a host so real typos still fail as unknown
+// commands rather than becoming "https://typo".
+func normalizeURL(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Contains(s, "://") {
+		return s
+	}
+	host := s
+	if i := strings.IndexAny(host, "/?#"); i >= 0 {
+		host = host[:i]
+	}
+	if !strings.Contains(host, ".") {
+		return s
+	}
+	return "https://" + s
 }
 
 // configArgument finds --config/-c before cobra parses, because the config
