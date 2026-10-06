@@ -31,6 +31,7 @@ type Config struct {
 	DownloadWorkers   int
 	HTTPTimeout       time.Duration
 	BusyTimeout       time.Duration
+	PreflightTimeout  time.Duration
 	Retries           int
 	DownloadDirectory string
 	Metadata          string
@@ -103,7 +104,8 @@ func Default() (Config, error) {
 	return Config{
 		Paths: paths, CrawlConcurrency: 8, DownloadWorkers: 4,
 		HTTPTimeout: 30 * time.Second, BusyTimeout: 5 * time.Second,
-		Retries: 3, DownloadDirectory: "downloads", Metadata: "normal",
+		PreflightTimeout: 8 * time.Second,
+		Retries:          3, DownloadDirectory: "downloads", Metadata: "normal",
 		Color: true, UserAgent: "dirhop/1",
 	}, nil
 }
@@ -158,6 +160,8 @@ func Load(path string) (Config, error) {
 			cfg.HTTPTimeout, err = time.ParseDuration(value)
 		case "busy_timeout":
 			cfg.BusyTimeout, err = time.ParseDuration(value)
+		case "preflight_timeout":
+			cfg.PreflightTimeout, err = time.ParseDuration(value)
 		case "retries":
 			cfg.Retries, err = nonNegativeInt(value)
 		case "download_directory":
@@ -187,6 +191,9 @@ func Load(path string) (Config, error) {
 	applyEnvOverrides(&cfg)
 	if cfg.HTTPTimeout <= 0 || cfg.BusyTimeout <= 0 {
 		return Config{}, errors.New("timeouts must be positive")
+	}
+	if cfg.PreflightTimeout <= 0 {
+		cfg.PreflightTimeout = 8 * time.Second
 	}
 	return cfg, nil
 }

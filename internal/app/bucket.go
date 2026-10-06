@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/m1r3dk/dirhop/internal/bucket"
+	"github.com/m1r3dk/dirhop/internal/httpclient"
 	"github.com/m1r3dk/dirhop/internal/model"
 )
 
@@ -34,13 +35,27 @@ func (p Preflight) Accessible() bool {
 // generic HTTP directory listings it checks reachability with HEAD, falling back
 // to a tiny GET when a server does not support HEAD.
 func (a *App) PreflightAccess(ctx context.Context, rawURL string) Preflight {
+	// Bound every single probe so one stalled host cannot pin a worker. The
+	// dedicated preflight client already has a short timeout and no retries; this
+	// per-request deadline is a hard ceiling on top of that.
+	ctx, cancel := context.WithTimeout(ctx, a.Config.PreflightTimeout)
+	defer cancel()
 	target, ok := bucket.Detect(rawURL)
 	if !ok {
 		access, err := a.checkGenericAccess(ctx, rawURL)
 		return Preflight{URL: rawURL, Access: access, Bucket: false, Err: err}
 	}
-	access, err := bucket.CheckAccess(ctx, a.HTTP, target, a.Config.UserAgent)
+	access, err := bucket.CheckAccess(ctx, a.preflightClient(), target, a.Config.UserAgent)
 	return Preflight{URL: rawURL, Access: access, Bucket: true, Err: err}
+}
+
+// preflightClient returns the short-timeout, no-retry client for accessibility
+// checks, falling back to the main client if one was not constructed.
+func (a *App) preflightClient() *httpclient.Client {
+	if a.Preflight != nil {
+		return a.Preflight
+	}
+	return a.HTTP
 }
 
 func (a *App) checkGenericAccess(ctx context.Context, rawURL string) (bucket.Access, error) {
@@ -67,7 +82,7 @@ func (a *App) doGenericPreflight(ctx context.Context, method, rawURL string) (bu
 	if method == http.MethodGet {
 		req.Header.Set("Range", "bytes=0-0")
 	}
-	resp, err := a.HTTP.Do(req)
+	resp, err := a.preflightClient().Do(req)
 	if err != nil {
 		if isNoSuchHost(err) {
 			return bucket.AccessMissing, nil, false

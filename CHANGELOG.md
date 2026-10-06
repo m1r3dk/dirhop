@@ -47,6 +47,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Azure Blob Storage and DigitalOcean Spaces bucket support.
 
 ### Changed
+- Preflight is much faster and no longer floods the network: it uses a dedicated
+  client with a short per-probe timeout (default 8s, `preflight_timeout` in
+  config) and zero retries, so each target is checked with exactly one request
+  and dead or stalled hosts fail fast instead of blocking a worker for the full
+  30s crawl timeout times the retry count.
 - SQLite write transactions are serialized in-process so concurrent crawls
   (parallel multi-bucket scans) never surface `SQLITE_BUSY`; reads stay
   concurrent under WAL.

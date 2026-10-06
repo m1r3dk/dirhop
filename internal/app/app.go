@@ -30,6 +30,10 @@ type App struct {
 	DB       *database.DB
 	Sessions *session.Manager
 	HTTP     *httpclient.Client
+	// Preflight is a short-timeout, no-retry client used only for the cheap
+	// accessibility check. Dead hosts must fail fast and a flooded list must not
+	// be multiplied by retries, so it never reuses the main client's retry policy.
+	Preflight *httpclient.Client
 	// Progress, when set, receives live crawl counters.
 	Progress func(model.CrawlRun)
 	// Logging records whether HTTP request logging is already enabled.
@@ -77,12 +81,30 @@ func Open(cfg config.Config) (*App, error) {
 		MaxIdleConnsPerHost: max(16, cfg.CrawlConcurrency+cfg.DownloadWorkers),
 		MaxConnsPerHost:     max(24, cfg.CrawlConcurrency+cfg.DownloadWorkers),
 	})
-	return &App{Config: cfg, DB: db, Sessions: session.New(db), HTTP: http}, nil
+	// Preflight: short overall timeout, aggressive dial/TLS/header deadlines, and
+	// zero retries. A dead or stalled host returns a verdict in a few seconds at
+	// most and is probed exactly once, so a huge list cannot flood the network
+	// with retried requests. Idle connections are capped so a 30k-host sweep does
+	// not hold tens of thousands of sockets open.
+	preflight := httpclient.New(httpclient.Config{
+		Timeout:               cfg.PreflightTimeout,
+		DialTimeout:           min(cfg.PreflightTimeout, 4*time.Second),
+		TLSHandshakeTimeout:   min(cfg.PreflightTimeout, 4*time.Second),
+		ResponseHeaderTimeout: cfg.PreflightTimeout,
+		Retries:               0,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   2,
+		MaxConnsPerHost:       4,
+	})
+	return &App{Config: cfg, DB: db, Sessions: session.New(db), HTTP: http, Preflight: preflight}, nil
 }
 
 func (a *App) Close() error {
 	if a.HTTP != nil {
 		a.HTTP.CloseIdleConnections()
+	}
+	if a.Preflight != nil {
+		a.Preflight.CloseIdleConnections()
 	}
 	if a.DB != nil {
 		return a.DB.Close()

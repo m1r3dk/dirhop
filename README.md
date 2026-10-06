@@ -89,6 +89,11 @@ dirhop scan -f buckets.txt -p 10 --failed-file failed.txt
 dirhop scan -f failed.txt -p 10       # retry just the failures later
 ```
 
+Preflight probes each target exactly once with a short timeout (default 8s, no
+retries), so dead or stalled hosts fail fast and a big list never floods the
+network with retried requests. Tune the deadline in the config file with
+`preflight_timeout = "5s"` and the overlap with `-p`.
+
 You can also retry failures straight from the index, without keeping any list:
 
 ```sh

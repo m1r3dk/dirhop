@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m1r3dk/dirhop/internal/bucket"
 	"github.com/m1r3dk/dirhop/internal/config"
 	"github.com/m1r3dk/dirhop/internal/downloader"
 	"github.com/m1r3dk/dirhop/internal/model"
@@ -128,4 +129,45 @@ func TestPersistentIndexRefreshAndExplicitDownload(t *testing.T) {
 
 func findZip() model.FindOptions {
 	return model.FindOptions{Extensions: []string{"zip"}, Type: model.EntryTypeFile}
+}
+
+// Preflight must probe each host exactly once (no retries) so a huge list is not
+// multiplied into a flood, and must honor its short timeout rather than the main
+// crawl timeout.
+func TestPreflightNoRetriesAndShortTimeout(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		// 503 is a status the main client would retry; preflight must not.
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	cfg.Paths.DataDir, cfg.Paths.ConfigDir, cfg.Paths.CacheDir = tmp, tmp, tmp
+	cfg.Paths.Database = filepath.Join(tmp, "dirhop.db")
+	cfg.Paths.History = filepath.Join(tmp, "history")
+	cfg.HTTPTimeout = 30 * time.Second
+	cfg.Retries = 3
+	cfg.PreflightTimeout = 2 * time.Second
+
+	a, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	// A plain host (non-bucket) 503 is one HEAD. Use an S3-style host so the
+	// bucket CheckAccess path is exercised with a single GET.
+	v := a.PreflightAccess(context.Background(), server.URL+"/")
+	if v.Access == bucket.AccessPublic {
+		t.Fatalf("503 should not be public: %+v", v)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("preflight sent %d requests, want exactly 1 (no retries)", n)
+	}
 }
