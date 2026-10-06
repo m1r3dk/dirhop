@@ -184,7 +184,9 @@ make vet
 make build
 ```
 
-Architecture and security decisions are documented in [`docs/architecture.md`](docs/architecture.md).
+Architecture and security decisions are documented in [`docs/architecture.md`](docs/architecture.md). Extended guides (install, commands, buckets, configuration, FAQ) live in [`docs/wiki/`](docs/wiki/) and mirror the GitHub wiki.
+
+Contributions are welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ## License
 
