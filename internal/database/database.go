@@ -121,8 +121,8 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 		return err
 	}
 	defer tx.Rollback()
-	site.EntryCount = max64(site.EntryCount, 1)
-	site.DirectoryCount = max64(site.DirectoryCount, 1)
+	site.EntryCount = max(site.EntryCount, 1)
+	site.DirectoryCount = max(site.DirectoryCount, 1)
 	res, err := tx.ExecContext(ctx, `INSERT INTO sites(name,original_url,canonical_url,hostname,parser_type,cwd,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, site.Name, site.OriginalURL, site.CanonicalURL, site.Hostname, site.ParserType, site.CWD, site.EntryCount, site.FileCount, site.DirectoryCount, site.TotalSize, site.ScanStatus, site.CrawlConcurrency, unix(site.CreatedAt), unix(site.UpdatedAt), nullableTime(site.LastCrawledAt))
 	if err != nil {
 		return fmt.Errorf("insert site: %w", err)
@@ -137,13 +137,6 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	}
 	_ = res
 	return tx.Commit()
-}
-
-func max64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 const siteColumns = `id,name,original_url,canonical_url,hostname,parser_type,cwd,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at`

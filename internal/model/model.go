@@ -8,7 +8,6 @@ type EntryType string
 const (
 	EntryTypeDirectory EntryType = "directory"
 	EntryTypeFile      EntryType = "file"
-	EntryTypeSymlink   EntryType = "symlink"
 	EntryTypeUnknown   EntryType = "unknown"
 )
 
