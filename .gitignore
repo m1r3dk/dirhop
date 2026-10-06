@@ -6,6 +6,3 @@ coverage.out
 *.db-wal
 *.part
 .DS_Store
-
-# Private bucket lists and ad-hoc fetch scripts (user input data, not fixtures)
-/testdata/buckets/
