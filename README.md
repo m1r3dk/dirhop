@@ -80,6 +80,15 @@ dirhop scan -f buckets.txt --rescan   # force re-crawl of everything
 dirhop sessions --status failed       # list buckets that could not be scanned
 ```
 
+Large runs show live preflight progress (`Preflight: N/M checked`) and can save
+every target that could not be scanned (private, missing, errored, or failed) to
+a file for retry. That file is re-readable by `scan -f`:
+
+```sh
+dirhop scan -f buckets.txt -p 10 --failed-file failed.txt
+dirhop scan -f failed.txt -p 10       # retry just the failures later
+```
+
 Deletions are tracked across scans. When a rescan no longer sees a file that was
 there before, it is kept (soft-deleted) with its last-seen size and timestamp
 rather than purged, and `changes` lists what disappeared:
@@ -132,7 +141,7 @@ Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--
 | `find` | `--regex/-r`, `--ext/-e`, `--type/-t`, `--size`, `--modified-after` |
 | `urls` | `--files-only/-f`, `--dirs-only/-d`, `--ext/-e`, `--include/-i` |
 | `download` | `--output/-o`, `--workers/-w`, `--all/-a`, `--include/-i`, `--exclude/-e`, `--segments`, `--resume`, `--overwrite`, `--skip-existing`, `--max-rate` |
-| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight`, `--rescan` |
+| `scan` | `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight`, `--rescan`, `--failed-file` |
 | `ghw` | `--files`, `--type/-t`, `--ext/-e`, `--limit/-l`, `--order`, `--direction`, `--full-path`, `--scan`, `--urls` |
 | `refresh` | `--full/-f`, `--metadata/-m` |
 | `errors`, `downloads` | `--limit/-l` |

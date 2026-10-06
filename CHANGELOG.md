@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `scan` shows live preflight progress (`Preflight: N/M checked`) for large
+  lists and can write every unscannable target to a retry file with
+  `--failed-file PATH`. The file lists private, missing, errored, and
+  scan-failed targets with a reason comment and is re-readable by `scan -f`.
 - Bucket sessions are now named by the bucket (or Azure container) name alone,
   e.g. `wustl` instead of `wustl-s3-us-west-2-amazonaws-com`. Non-bucket sites
   keep host-based names. `session normalize-names` renames existing sessions to

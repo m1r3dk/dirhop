@@ -45,6 +45,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 
 - `scan [URL...] [-f FILE]` - `--file/-f`, `--metadata/-m`, `--parallel/-p`, `--preflight`, `--no-preflight` (full rescan, multi-target scans preflight automatically, `--parallel 0` auto-scales workers)
 - `scan` also takes `--rescan` to re-crawl buckets that already completed (default skips them)
+- `scan --failed-file PATH` writes unscannable targets (private/missing/errored/failed) to PATH for retry with `scan -f PATH`
 - `refresh` - `--full/-f`, `--metadata/-m`
 - `errors`, `downloads` - `--limit/-l`
 - `changes` - `--limit/-l` (files removed since the last successful scan)

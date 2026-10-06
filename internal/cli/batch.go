@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/m1r3dk/dirhop/internal/app"
 	"github.com/m1r3dk/dirhop/internal/bucket"
@@ -126,15 +127,22 @@ type batchResult struct {
 // many buckets keeps the pipeline full. SQLite writes stay safe because the
 // database serializes write transactions internally.
 func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, metadata string, opt *options, out io.Writer) error {
+	// inaccessible accumulates targets that cannot be scanned (preflight drops +
+	// scan-phase failures) so they can be written to a retry file at the end.
+	var inaccessible []failedTarget
 	if opt.preflight && len(specs) > 0 {
-		var err error
-		specs, err = preflightFilter(ctx, a, specs, opt, out)
+		pr, err := preflightFilter(ctx, a, specs, opt, out)
 		if err != nil {
 			return err
 		}
+		specs = pr.kept
+		inaccessible = append(inaccessible, pr.inaccessible...)
 		if len(specs) == 0 {
 			if !opt.quiet && !opt.json {
 				fmt.Fprintln(out, "Preflight: no accessible targets to scan.")
+			}
+			if werr := writeFailedFile(opt.failedFile, inaccessible, out, opt); werr != nil {
+				return werr
 			}
 			return nil
 		}
@@ -258,6 +266,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		switch {
 		case r.Error != "":
 			failed++
+			inaccessible = append(inaccessible, failedTarget{r.URL, r.Error})
 			if firstErr == nil {
 				firstErr = errs[i]
 			}
@@ -271,6 +280,9 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		}
 	} else if !opt.quiet && len(specs) > 1 {
 		fmt.Fprintf(out, "Done: %d indexed, %d skipped, %d failed\n", len(specs)-failed-skipped, skipped, failed)
+	}
+	if werr := writeFailedFile(opt.failedFile, inaccessible, out, opt); werr != nil {
+		return werr
 	}
 	if firstErr == nil {
 		return nil
@@ -296,6 +308,35 @@ func canonicalOrRaw(raw string) string {
 		return c
 	}
 	return raw
+}
+
+// writeFailedFile records inaccessible/failed targets to a file so a large run
+// can be retried against just the failures. Each line is "<url>  # <reason>",
+// which `scan -f` reads back (the trailing comment is ignored on re-read). An
+// empty path means the caller did not request a file; nothing is written. When
+// there are no failures and a path was given, any stale file is removed so the
+// file always reflects the latest run.
+func writeFailedFile(path string, failed []failedTarget, out io.Writer, opt *options) error {
+	if path == "" {
+		return nil
+	}
+	if len(failed) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+		}
+		return nil
+	}
+	var b strings.Builder
+	for _, f := range failed {
+		fmt.Fprintf(&b, "%s  # %s\n", f.URL, f.Reason)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+	}
+	if !opt.quiet && !opt.json {
+		fmt.Fprintf(out, "Wrote %d failed target(s) to %s\n", len(failed), path)
+	}
+	return nil
 }
 
 // resolveWorkers turns the --parallel value into a worker count. 0 means auto:
@@ -324,12 +365,26 @@ func resolveWorkers(parallel, sites int) int {
 	}
 }
 
+// preflightResult is the outcome of the preflight phase: the specs worth
+// scanning (kept) and the ones dropped as inaccessible with a short reason, so
+// callers can record the latter to a file.
+type preflightResult struct {
+	kept         []urlSpec
+	inaccessible []failedTarget
+}
+
+// failedTarget is a target that could not be scanned, with a short reason.
+type failedTarget struct {
+	URL    string
+	Reason string
+}
+
 // preflightFilter checks each target's accessibility with one cheap request and
-// returns only the specs worth fully scanning. Targets that are private, missing
-// (dead host / no such bucket), or erroring are dropped, so a large list is not
-// spent crawling targets that cannot be read. The check itself runs concurrently
-// for speed.
-func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *options, out io.Writer) ([]urlSpec, error) {
+// returns the specs worth fully scanning plus the inaccessible ones. Targets
+// that are private, missing (dead host / no such bucket), or erroring are
+// dropped, so a large list is not spent crawling targets that cannot be read.
+// The check runs concurrently and prints live progress for big lists.
+func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *options, out io.Writer) (preflightResult, error) {
 	// Buckets that already completed are kept without a network request: indexOne
 	// skips them cheaply unless --rescan is set. This keeps re-running a large
 	// list fast and avoids re-probing everything already indexed.
@@ -346,10 +401,32 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 	}
 	verdicts := make([]app.Preflight, len(toCheck))
 	workers := resolveWorkers(opt.parallel, len(toCheck))
-	if !opt.quiet && !opt.json {
+	showProgress := !opt.quiet && !opt.json
+	if showProgress {
 		fmt.Fprintf(out, "Preflight: checking %d targets with %d workers (%d already scanned)...\n", len(toCheck), workers, len(alreadyDone))
 	}
 	jobs := make(chan int)
+	var checked atomic.Int64
+	// Live progress: a single carriage-return line updated a few times a second
+	// so a 30k-target preflight never looks frozen. Off for quiet/json.
+	stopProgress := make(chan struct{})
+	var progressDone sync.WaitGroup
+	if showProgress && len(toCheck) > 1 {
+		progressDone.Add(1)
+		go func() {
+			defer progressDone.Done()
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopProgress:
+					return
+				case <-ticker.C:
+					fmt.Fprintf(out, "\r\x1b[KPreflight: %d/%d checked", checked.Load(), len(toCheck))
+				}
+			}
+		}()
+	}
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
@@ -358,9 +435,11 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 			for i := range jobs {
 				if err := ctx.Err(); err != nil {
 					verdicts[i] = app.Preflight{URL: toCheck[i].URL, Err: err}
+					checked.Add(1)
 					continue
 				}
 				verdicts[i] = a.PreflightAccess(ctx, toCheck[i].URL)
+				checked.Add(1)
 			}
 		}()
 	}
@@ -369,12 +448,18 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 	}
 	close(jobs)
 	wg.Wait()
+	if showProgress && len(toCheck) > 1 {
+		close(stopProgress)
+		progressDone.Wait()
+		fmt.Fprintf(out, "\r\x1b[KPreflight: %d/%d checked\n", checked.Load(), len(toCheck))
+	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return preflightResult{}, err
 	}
 
 	kept := make([]urlSpec, 0, len(specs))
 	kept = append(kept, alreadyDone...)
+	var inaccessible []failedTarget
 	var public, denied, missing, errored int
 	for i, v := range verdicts {
 		switch {
@@ -383,10 +468,17 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 			kept = append(kept, toCheck[i])
 		case v.Access == bucket.AccessDenied:
 			denied++
+			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, "private (access denied)"})
 		case v.Access == bucket.AccessMissing:
 			missing++
+			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, "missing (no such bucket/host)"})
 		default:
 			errored++
+			reason := "errored"
+			if v.Err != nil {
+				reason = "errored: " + v.Err.Error()
+			}
+			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, reason})
 		}
 	}
 	if !opt.quiet && !opt.json {
@@ -394,5 +486,5 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 			public, denied, missing, errored)
 		fmt.Fprintf(out, " -> scanning %d/%d\n", len(kept), len(specs))
 	}
-	return kept, nil
+	return preflightResult{kept: kept, inaccessible: inaccessible}, nil
 }

@@ -33,6 +33,7 @@ type options struct {
 	preflight   bool
 	noPreflight bool
 	forceRescan bool
+	failedFile  string
 	json        bool
 	quiet       bool
 	noColor     bool
@@ -269,6 +270,7 @@ ignored, and an optional second field names the session:
 	cmd.Flags().BoolVar(&opt.preflight, "preflight", false, "check accessibility first and skip private, missing, or erroring targets")
 	cmd.Flags().BoolVar(&opt.noPreflight, "no-preflight", false, "disable the automatic preflight check for multi-target scans")
 	cmd.Flags().BoolVar(&opt.forceRescan, "rescan", false, "re-crawl buckets that were already scanned successfully (default skips them)")
+	cmd.Flags().StringVar(&opt.failedFile, "failed-file", "", "write targets that could not be scanned (private/missing/errored) to this file for retry")
 	return cmd
 }
 

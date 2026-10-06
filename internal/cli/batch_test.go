@@ -374,6 +374,69 @@ func TestChangesListsRemovedFiles(t *testing.T) {
 	}
 }
 
+// A failed/inaccessible run writes the failing targets to --failed-file in a
+// form that scan -f can read back for a retry.
+func TestScanFailedFileIsWrittenAndReReadable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ok/" {
+			fmt.Fprint(w, `<title>Index of /ok</title><a href="a.zip">a.zip</a>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "config.toml")
+	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
+	list := filepath.Join(tmp, "urls.txt")
+	_ = os.WriteFile(list, []byte(server.URL+"/ok/\n"+server.URL+"/missing/\n"), 0o600)
+	failed := filepath.Join(tmp, "failed.txt")
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		root, cleanup, err := newRoot(&out, &out, configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		root.SetArgs(args)
+		err = root.Execute()
+		return out.String(), err
+	}
+
+	// --no-preflight so the 404 fails at the scan stage and is recorded.
+	out, _ := run("scan", "-f", list, "--no-preflight", "--failed-file", failed)
+	if !strings.Contains(out, "Wrote 1 failed target(s)") {
+		t.Fatalf("expected failed-file notice, got:\n%s", out)
+	}
+	data, err := os.ReadFile(failed)
+	if err != nil {
+		t.Fatalf("failed file not written: %v", err)
+	}
+	if !strings.Contains(string(data), "/missing/") || strings.Contains(string(data), "/ok/") {
+		t.Fatalf("failed file content wrong:\n%s", data)
+	}
+	// The failed file must be re-readable by scan -f (reason comment ignored).
+	specs, err := collectURLs(nil, failed, "", nil)
+	if err != nil {
+		t.Fatalf("failed file not re-readable: %v", err)
+	}
+	if len(specs) != 1 || !strings.HasSuffix(specs[0].URL, "/missing/") {
+		t.Fatalf("re-read specs wrong: %+v", specs)
+	}
+
+	// A clean run removes a stale failed file.
+	list2 := filepath.Join(tmp, "urls2.txt")
+	_ = os.WriteFile(list2, []byte(server.URL+"/ok/\n"), 0o600)
+	if _, err := run("scan", "-f", list2, "--no-preflight", "--rescan", "--failed-file", failed); err != nil {
+		t.Fatalf("clean run: %v", err)
+	}
+	if _, err := os.Stat(failed); !os.IsNotExist(err) {
+		t.Fatalf("stale failed file was not removed: %v", err)
+	}
+}
+
 func TestResolveWorkers(t *testing.T) {
 	cases := []struct{ parallel, sites, want int }{
 		{0, 0, 1},    // nothing to do
