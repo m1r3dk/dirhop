@@ -1028,6 +1028,16 @@ func newSession(a *app.App, opt *options, out io.Writer) *cobra.Command {
 	}}
 	refresh.Flags().BoolVarP(&full, "full", "f", false, "full reconciliation")
 	group.AddCommand(refresh)
+	group.AddCommand(&cobra.Command{Use: "normalize-names", Short: "Rename sessions to their bucket name (e.g. wustl instead of wustl-s3-...)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		n, err := a.Sessions.NormalizeNames(cmd.Context())
+		if err != nil {
+			return err
+		}
+		if !opt.quiet {
+			fmt.Fprintf(out, "Renamed %d session(s) to bucket names.\n", n)
+		}
+		return nil
+	}})
 	return group
 }
 

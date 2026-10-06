@@ -53,6 +53,7 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 ## Sessions
 
 - `sessions`, `session list|use|info|rename|delete|refresh`
+- `session normalize-names` renames existing sessions to their bucket name (e.g. `wustl`)
 - `sessions --status complete|failed|pending|running|cancelled` filters by scan status
 - `session delete` - `--yes/-y`
 - shell `use <name|number>` to switch the active session

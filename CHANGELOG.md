@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Bucket sessions are now named by the bucket (or Azure container) name alone,
+  e.g. `wustl` instead of `wustl-s3-us-west-2-amazonaws-com`. Non-bucket sites
+  keep host-based names. `session normalize-names` renames existing sessions to
+  the new scheme, keeping names unique.
 - `scan --preflight` runs a fast, concurrent accessibility check (one minimal
   listing request per recognized bucket, or HEAD/tiny GET for ordinary HTTP
   listings) and scans only targets that are reachable and publicly listable

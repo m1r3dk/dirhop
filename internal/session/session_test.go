@@ -68,3 +68,88 @@ func TestManagerLifecycle(t *testing.T) {
 		t.Fatalf("active after delete=%v", err)
 	}
 }
+
+// New bucket sessions are named by bucket only (wustl), not the full host.
+func TestBucketSessionsNamedByBucket(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := New(db)
+	cases := map[string]string{
+		"https://wustl.s3-us-west-2.amazonaws.com/":       "wustl",
+		"https://amazetest.storage.googleapis.com/":       "amazetest",
+		"https://acct.blob.core.windows.net/documents/":   "documents",
+		"https://s3.us-east-2.amazonaws.com/path-bucket/": "path-bucket",
+	}
+	for raw, want := range cases {
+		s, created, err := m.Open(ctx, raw, "", false)
+		if err != nil || !created {
+			t.Fatalf("open %s: created=%v err=%v", raw, created, err)
+		}
+		if s.Name != want {
+			t.Fatalf("open %s: name=%q want %q", raw, s.Name, want)
+		}
+	}
+	// A non-bucket host still falls back to host-based naming.
+	s, _, err := m.Open(ctx, "https://mirror.example.com/pub/", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "mirror-example-com-pub" {
+		t.Fatalf("non-bucket name=%q", s.Name)
+	}
+}
+
+// NormalizeNames renames legacy host-based names to bucket names and keeps them
+// unique when two different buckets share a bucket label.
+func TestNormalizeNames(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := New(db)
+
+	// Simulate legacy sessions by forcing the old host-based names.
+	a, _, err := m.Open(ctx, "https://wustl.s3-us-west-2.amazonaws.com/", "wustl-s3-us-west-2-amazonaws-com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A different region, same bucket label, also legacy-named.
+	b, _, err := m.Open(ctx, "https://wustl.s3-eu-west-1.amazonaws.com/", "wustl-s3-eu-west-1-amazonaws-com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := m.NormalizeNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("renamed %d, want 2", n)
+	}
+	ra, err := m.db.SiteByID(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := m.db.SiteByID(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{ra.Name: true, rb.Name: true}
+	if len(names) != 2 || !names["wustl"] || !names["wustl-2"] {
+		t.Fatalf("normalized names not unique bucket names: %q, %q", ra.Name, rb.Name)
+	}
+	// Running again is a no-op.
+	n2, err := m.NormalizeNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Fatalf("second normalize renamed %d, want 0", n2)
+	}
+}

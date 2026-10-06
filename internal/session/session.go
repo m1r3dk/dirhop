@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/m1r3dk/dirhop/internal/bucket"
 	"github.com/m1r3dk/dirhop/internal/database"
 	"github.com/m1r3dk/dirhop/internal/model"
 )
@@ -114,7 +115,7 @@ func (m *Manager) Open(ctx context.Context, rawURL, name string, activate bool) 
 }
 
 func (m *Manager) availableName(ctx context.Context, u *url.URL) string {
-	base := sanitizeName(u.Hostname() + "-" + strings.Trim(path.Base(strings.TrimSuffix(u.Path, "/")), "/"))
+	base := preferredBase(u)
 	if base == "" {
 		base = "session"
 	}
@@ -126,6 +127,72 @@ func (m *Manager) availableName(ctx context.Context, u *url.URL) string {
 		}
 		candidate = fmt.Sprintf("%s-%d", base, i)
 	}
+}
+
+// preferredBase is the session name stem for a URL. Recognized buckets use just
+// the bucket (or container) name, e.g. "wustl" for
+// wustl.s3-us-west-2.amazonaws.com, so sessions read cleanly. Anything else
+// falls back to host + last path segment.
+func preferredBase(u *url.URL) string {
+	if target, ok := bucket.Detect(u.String()); ok && target.Bucket != "" {
+		if base := sanitizeName(target.Bucket); base != "" {
+			return base
+		}
+	}
+	return sanitizeName(u.Hostname() + "-" + strings.Trim(path.Base(strings.TrimSuffix(u.Path, "/")), "/"))
+}
+
+// NormalizeNames renames every session to its preferred bucket-based name,
+// keeping names unique. It is a two-phase rename (to temporary names first) so
+// no transient UNIQUE collision can occur when two old names map to the same
+// bucket base. Returns the number of sessions whose name changed.
+func (m *Manager) NormalizeNames(ctx context.Context) (int, error) {
+	sites, err := m.db.ListSites(ctx)
+	if err != nil {
+		return 0, err
+	}
+	// Compute the desired final name for each site, deduping across the whole set.
+	used := map[string]bool{}
+	desired := make(map[int64]string, len(sites))
+	for _, s := range sites {
+		u, err := url.Parse(s.CanonicalURL)
+		if err != nil {
+			desired[s.ID] = s.Name
+			used[s.Name] = true
+			continue
+		}
+		base := preferredBase(u)
+		if base == "" {
+			base = "session"
+		}
+		name := base
+		for i := 2; used[name]; i++ {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		used[name] = true
+		desired[s.ID] = name
+	}
+	// Phase 1: move every site that needs a new name to a unique temporary name,
+	// so the final names are all free regardless of rename order.
+	var changing []model.Site
+	for _, s := range sites {
+		if desired[s.ID] != s.Name {
+			changing = append(changing, s)
+		}
+	}
+	for _, s := range changing {
+		tmp := fmt.Sprintf("__dirhop_migrating_%d", s.ID)
+		if err := m.db.RenameSite(ctx, s.ID, tmp); err != nil {
+			return 0, err
+		}
+	}
+	// Phase 2: assign the final names.
+	for _, s := range changing {
+		if err := m.db.RenameSite(ctx, s.ID, desired[s.ID]); err != nil {
+			return 0, err
+		}
+	}
+	return len(changing), nil
 }
 
 var dashRE = regexp.MustCompile(`-+`)
