@@ -18,7 +18,7 @@ Describe any manual testing (commands run, targets used).
 
 ## Checklist
 
-- [ ] My change keeps dirhop within its authorized-use scope (no path discovery,
+- [ ] My change keeps dirhop within its ethical-use scope (no path discovery,
       credential guessing, or access-control bypass).
 - [ ] I did not commit secrets or private data.
 - [ ] I updated docs/CHANGELOG where relevant.

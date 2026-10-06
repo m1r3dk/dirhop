@@ -5,11 +5,11 @@ build, test, and submit changes.
 
 ## Scope and ethics
 
-`dirhop` is a tool for indexing and downloading from **public** directory
-listings and **public** object-storage buckets, or systems you are explicitly
-authorized to access. It does not discover unlinked paths, guess credentials, or
-bypass access controls. Contributions that add such capabilities will not be
-accepted. See [`SECURITY.md`](SECURITY.md) for the responsible-use policy.
+`dirhop` indexes and downloads from HTTP/HTTPS directory listings and
+object-storage buckets through their standard listing APIs. It is provided for
+**ethical purposes only**. It does not discover unlinked paths, guess
+credentials, or bypass access controls, and contributions that add such
+capabilities will not be accepted. See [`SECURITY.md`](SECURITY.md).
 
 ## Development setup
 

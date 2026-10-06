@@ -9,11 +9,11 @@ body:
         bucket lists, API keys, or other secrets. For security issues, follow
         SECURITY.md instead of opening a public issue.
   - type: checkboxes
-    id: authorized
+    id: ethical
     attributes:
-      label: Authorized use
+      label: Ethical use
       options:
-        - label: I am using dirhop only against public or explicitly authorized targets.
+        - label: I am using dirhop for ethical purposes only.
           required: true
   - type: textarea
     id: what-happened

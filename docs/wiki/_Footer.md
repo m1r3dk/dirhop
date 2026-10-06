@@ -1,1 +1,1 @@
-dirhop wiki - use with authorized targets only. (c) dirhop contributors, MIT.
+dirhop wiki - for ethical use only. (c) dirhop contributors, MIT.

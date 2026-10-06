@@ -2,7 +2,7 @@
 
 ## Scope and command routing
 
-`dirhop` treats an authorized HTTP directory listing as a persistent, read-only remote filesystem. Crawling retrieves directory pages and listing metadata only. File bodies are requested only by `download`.
+`dirhop` treats an HTTP directory listing as a persistent, read-only remote filesystem. Crawling retrieves directory pages and listing metadata only. File bodies are requested only by `download`.
 
 The root command handles three entry forms:
 

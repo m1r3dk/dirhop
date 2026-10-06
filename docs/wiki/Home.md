@@ -1,13 +1,12 @@
 # dirhop
 
-`dirhop` turns an authorized HTTP/HTTPS directory listing or a public cloud
+`dirhop` turns an HTTP/HTTPS directory listing or a public cloud
 bucket into a persistent local metadata index you can browse, search, and
 download from like a local filesystem. Crawls fetch directory pages (or bucket
 listings) only; file content is transferred only after an explicit `download`.
 
-> **Authorized use only.** Use `dirhop` solely with public listings/buckets or
-> systems you are explicitly permitted to access. The authors accept no
-> liability for misuse. See [[Security & Responsible Use|Security]].
+> **Ethical use only.** Use `dirhop` for ethical purposes only. The authors
+> accept no liability for misuse. See [[Security & Responsible Use|Security]].
 
 ## Pages
 

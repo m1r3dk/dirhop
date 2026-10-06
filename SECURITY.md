@@ -2,10 +2,10 @@
 
 ## Responsible use
 
-`dirhop` indexes and downloads from **publicly accessible** HTTP/HTTPS directory
-listings and **publicly listable** object-storage buckets (Amazon S3, Google
-Cloud Storage, Azure Blob Storage, DigitalOcean Spaces, and other
-S3-compatible stores), or systems you are explicitly authorized to access.
+`dirhop` indexes and downloads from HTTP/HTTPS directory listings and
+object-storage buckets (Amazon S3, Google Cloud Storage, Azure Blob Storage,
+DigitalOcean Spaces, and other S3-compatible stores) through their standard
+listing APIs.
 
 `dirhop` does **not**:
 
@@ -16,12 +16,11 @@ S3-compatible stores), or systems you are explicitly authorized to access.
   a browser or SDK would.
 
 You are responsible for complying with the law and with the terms of service of
-any system you point it at. Only use it where you have permission.
+any system you point it at.
 
-### Authorized use only / no liability
+### Ethical use only / no liability
 
-`dirhop` is provided **exclusively for authorized use** against buckets and
-systems you own or are explicitly permitted to access. The author(s) and
+`dirhop` is provided for **ethical purposes only**. The author(s) and
 contributors are **not responsible for any misuse, damage, or malicious or
 unlawful activity** performed with this tool. All responsibility and liability
 rests solely with the user. The software is provided "as is" without warranty of

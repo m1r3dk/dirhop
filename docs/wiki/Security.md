@@ -1,10 +1,8 @@
 # Security & Responsible Use
 
-## Authorized use only / no liability
+## Ethical use only / no liability
 
-`dirhop` is intended **solely for authorized use**: public directory listings,
-publicly listable buckets, and systems you own or have explicit, documented
-permission to access.
+`dirhop` is provided for **ethical purposes only**.
 
 The author(s) and contributors provide this software "as is", without warranty
 of any kind, and **accept no liability** for any misuse, damage, or unlawful or

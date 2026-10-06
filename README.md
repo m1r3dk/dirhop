@@ -1,15 +1,14 @@
 # dirhop
 
-`dirhop` turns an authorized HTTP/HTTPS directory-listing website into a persistent local metadata index that behaves like a remote filesystem. Crawls fetch directory pages only. File content is transferred only after an explicit `download` command.
+`dirhop` turns an HTTP/HTTPS directory-listing website into a persistent local metadata index that behaves like a remote filesystem. Crawls fetch directory pages only. File content is transferred only after an explicit `download` command.
 
-> Use `dirhop` only with public directory listings or systems you are explicitly authorized to access. It does not discover unlinked paths or bypass access controls.
+> Use `dirhop` for ethical purposes only.
 
 ## Disclaimer
 
-`dirhop` is intended **solely for authorized use**: public directory listings,
-publicly listable buckets, and systems you own or have explicit, documented
-permission to access. You are solely responsible for how you use it and for
-complying with all applicable laws and the terms of service of any target.
+`dirhop` is provided for **ethical purposes only**. You are solely responsible
+for how you use it and for complying with all applicable laws and the terms of
+service of any target.
 
 The author(s) and contributors provide this software "as is", without warranty
 of any kind, and **accept no liability** for any misuse, damage, or unlawful or

@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        dirhop only supports public or explicitly authorized targets. Requests
-        to add path discovery, credential guessing, or access-control bypass are
-        out of scope and will be declined.
+        dirhop is provided for ethical purposes only. Requests to add path
+        discovery, credential guessing, or access-control bypass are out of
+        scope and will be declined.
   - type: textarea
     id: problem
     attributes:
