@@ -55,7 +55,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - SQLite now uses one connection per process and a longer default busy timeout
   so two `dirhop` instances writing the same database wait for each other
-  instead of failing quickly with `SQLITE_BUSY`.
+  instead of failing quickly with `SQLITE_BUSY`; scan entry writes also retry
+  busy transactions with backoff.
 - Scans now show live crawl location in terminals: single-target crawls render
   `Crawling: bucket:/path`, and multi-bucket scans also keep a live
   "crawling ..." footer naming buckets currently in flight. Pipes, files, and

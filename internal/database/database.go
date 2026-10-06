@@ -25,14 +25,54 @@ var ErrNotFound = sql.ErrNoRows
 // WAL writer and never surface SQLITE_BUSY. Reads are not guarded and run
 // concurrently on other pooled connections under WAL.
 type DB struct {
-	sql     *sql.DB
-	writeMu sync.Mutex
+	sql         *sql.DB
+	busyTimeout time.Duration
+	writeMu     sync.Mutex
 }
 
 // lockWrite serializes a write transaction. Use as: defer d.lockWrite()().
 func (d *DB) lockWrite() func() {
 	d.writeMu.Lock()
 	return d.writeMu.Unlock
+}
+
+func (d *DB) withBusyRetry(ctx context.Context, op func() error) error {
+	deadline := time.Now().Add(maxDuration(2*time.Minute, d.busyTimeout))
+	delay := 50 * time.Millisecond
+	for {
+		err := op()
+		if err == nil || !isSQLiteBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if delay < time.Second {
+			delay *= 2
+			if delay > time.Second {
+				delay = time.Second
+			}
+		}
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "SQLITE_BUSY") || strings.Contains(s, "database is locked")
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 var memorySequence atomic.Uint64
@@ -62,7 +102,7 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 	// rely on WAL + busy_timeout for cross-process writers to take turns.
 	sqldb.SetMaxOpenConns(1)
 	sqldb.SetMaxIdleConns(1)
-	db := &DB{sql: sqldb}
+	db := &DB{sql: sqldb, busyTimeout: busyTimeout}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := sqldb.PingContext(ctx); err != nil {
@@ -563,51 +603,56 @@ func (d *DB) upsertEntries(ctx context.Context, entries []model.Entry, recount b
 		return []model.Entry{}, nil
 	}
 	defer d.lockWrite()()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,size,modified_at,etag,last_modified,content_type,extension,removed,created_at,updated_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,normalized_path) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,url=excluded.url,type=excluded.type,size=excluded.size,modified_at=excluded.modified_at,etag=excluded.etag,last_modified=excluded.last_modified,content_type=excluded.content_type,extension=excluded.extension,removed=excluded.removed,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at RETURNING id,created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer stmt.Close()
 	out := make([]model.Entry, len(entries))
-	for i, e := range entries {
-		if e.SiteID == 0 || e.NormalizedPath == "" || e.URL == "" {
-			return nil, fmt.Errorf("entry %d missing required fields", i)
+	err := d.withBusyRetry(ctx, func() error {
+		tx, err := d.sql.BeginTx(ctx, nil)
+		if err != nil {
+			return err
 		}
-		if e.Type == "" {
-			e.Type = model.EntryTypeUnknown
+		defer tx.Rollback()
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,size,modified_at,etag,last_modified,content_type,extension,removed,created_at,updated_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(site_id,normalized_path) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,url=excluded.url,type=excluded.type,size=excluded.size,modified_at=excluded.modified_at,etag=excluded.etag,last_modified=excluded.last_modified,content_type=excluded.content_type,extension=excluded.extension,removed=excluded.removed,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at RETURNING id,created_at`)
+		if err != nil {
+			return err
 		}
-		now := time.Now().UTC()
-		if e.CreatedAt.IsZero() {
-			e.CreatedAt = now
+		defer stmt.Close()
+		attemptOut := make([]model.Entry, len(entries))
+		for i, e := range entries {
+			if e.SiteID == 0 || e.NormalizedPath == "" || e.URL == "" {
+				return fmt.Errorf("entry %d missing required fields", i)
+			}
+			if e.Type == "" {
+				e.Type = model.EntryTypeUnknown
+			}
+			now := time.Now().UTC()
+			if e.CreatedAt.IsZero() {
+				e.CreatedAt = now
+			}
+			if e.UpdatedAt.IsZero() {
+				e.UpdatedAt = now
+			}
+			if e.LastSeenAt.IsZero() {
+				e.LastSeenAt = now
+			}
+			if e.Extension == "" && e.Type == model.EntryTypeFile {
+				e.Extension = strings.ToLower(filepath.Ext(e.Name))
+			}
+			if err := stmt.QueryRowContext(ctx, e.SiteID, e.ParentID, e.Name, e.NormalizedPath, e.URL, e.Type, e.Size, nullableTime(e.ModifiedAt), e.ETag, e.LastModified, e.ContentType, e.Extension, boolInt(e.Removed), unix(e.CreatedAt), unix(e.UpdatedAt), unix(e.LastSeenAt)).Scan(&e.ID, newUnixTime(&e.CreatedAt)); err != nil {
+				return fmt.Errorf("upsert %s: %w", e.NormalizedPath, err)
+			}
+			attemptOut[i] = e
 		}
-		if e.UpdatedAt.IsZero() {
-			e.UpdatedAt = now
+		if recount {
+			if err = recountTx(ctx, tx, entries[0].SiteID); err != nil {
+				return err
+			}
 		}
-		if e.LastSeenAt.IsZero() {
-			e.LastSeenAt = now
+		if err = tx.Commit(); err != nil {
+			return err
 		}
-		if e.Extension == "" && e.Type == model.EntryTypeFile {
-			e.Extension = strings.ToLower(filepath.Ext(e.Name))
-		}
-		if err := stmt.QueryRowContext(ctx, e.SiteID, e.ParentID, e.Name, e.NormalizedPath, e.URL, e.Type, e.Size, nullableTime(e.ModifiedAt), e.ETag, e.LastModified, e.ContentType, e.Extension, boolInt(e.Removed), unix(e.CreatedAt), unix(e.UpdatedAt), unix(e.LastSeenAt)).Scan(&e.ID, newUnixTime(&e.CreatedAt)); err != nil {
-			return nil, fmt.Errorf("upsert %s: %w", e.NormalizedPath, err)
-		}
-		out[i] = e
-	}
-	if recount {
-		if err = recountTx(ctx, tx, entries[0].SiteID); err != nil {
-			return nil, err
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		return nil, err
-	}
-	return out, nil
+		out = attemptOut
+		return nil
+	})
+	return out, err
 }
 func recountTx(ctx context.Context, tx *sql.Tx, siteID int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE sites SET entry_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0),file_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0 AND type='file'),directory_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0 AND type='directory'),total_size=COALESCE((SELECT SUM(size) FROM entries WHERE site_id=? AND removed=0 AND type='file'),0),updated_at=? WHERE id=?`, siteID, siteID, siteID, siteID, unix(time.Now()), siteID)

@@ -162,6 +162,59 @@ func TestConcurrentHandlesWaitForWriter(t *testing.T) {
 	}
 }
 
+func TestEntryUpsertRetriesAfterBusy(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+	db1, err := OpenWithTimeout(path, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db1.Close()
+	db2, err := OpenWithTimeout(path, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+
+	site := &model.Site{Name: "example", OriginalURL: "https://example.com/", CanonicalURL: "https://example.com/", Hostname: "example.com"}
+	if err = db1.CreateSite(ctx, site); err != nil {
+		t.Fatal(err)
+	}
+	root, err := db1.EntryByPath(ctx, site.ID, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db1.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sites SET updated_at=? WHERE id=?`, unix(time.Now()), site.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		size := int64(1)
+		_, err := db2.UpsertEntriesNoRecount(ctx, []model.Entry{{SiteID: site.ID, ParentID: &root.ID, Name: "file.zip", NormalizedPath: "/file.zip", URL: "https://example.com/file.zip", Type: model.EntryTypeFile, Size: &size}})
+		done <- err
+	}()
+	time.Sleep(150 * time.Millisecond)
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("upsert did not retry SQLITE_BUSY: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("upsert stayed blocked after writer committed")
+	}
+	if _, err = db1.EntryByPath(ctx, site.ID, "/file.zip", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMemoryDatabasesAreIsolated(t *testing.T) {
 	a, err := Open(":memory:")
 	if err != nil {
