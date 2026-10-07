@@ -24,11 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   e.g. `wustl` instead of `wustl-s3-us-west-2-amazonaws-com`. Non-bucket sites
   keep host-based names. `session normalize-names` renames existing sessions to
   the new scheme, keeping names unique.
-- `scan --preflight` runs a fast, concurrent accessibility check (one minimal
-  listing request per recognized bucket, or HEAD/tiny GET for ordinary HTTP
-  listings) and scans only targets that are reachable and publicly listable
-  right now, skipping private, deleted, dead-host, and erroring targets. On a
-  15-dead-host sample it finished and skipped all of them in under 2 seconds.
+- Preflight writes a TSV report after each run (default `preflight.tsv` next to
+  the database, override with `--preflight-file PATH`) with every checked target
+  classified as `accessible`, `private`, `missing`, `errored`, or
+  `already_scanned`.
 - Multi-target `scan` runs preflight automatically and offers `--no-preflight`
   when every target should be attempted regardless of the cheap check.
 - Re-running `scan` on a list skips buckets that already completed successfully

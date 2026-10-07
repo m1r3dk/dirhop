@@ -3,10 +3,12 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -513,6 +515,9 @@ func writeFailedFile(path string, failed []failedTarget, out io.Writer, opt *opt
 	for _, f := range failed {
 		fmt.Fprintf(&b, "%s  # %s\n", f.URL, f.Reason)
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
@@ -554,6 +559,13 @@ func resolveWorkers(parallel, sites int) int {
 type preflightResult struct {
 	kept         []urlSpec
 	inaccessible []failedTarget
+	report       []preflightReportRow
+}
+
+type preflightReportRow struct {
+	URL    string
+	Status string
+	Reason string
 }
 
 // failedTarget is a target that could not be scanned, with a short reason.
@@ -642,6 +654,10 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 
 	kept := make([]urlSpec, 0, len(specs))
 	kept = append(kept, alreadyDone...)
+	report := make([]preflightReportRow, 0, len(specs))
+	for _, s := range alreadyDone {
+		report = append(report, preflightReportRow{URL: s.URL, Status: "already_scanned", Reason: "completed session already indexed"})
+	}
 	var inaccessible []failedTarget
 	var public, denied, missing, errored int
 	for i, v := range verdicts {
@@ -649,12 +665,17 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 		case v.Accessible():
 			public++
 			kept = append(kept, toCheck[i])
+			report = append(report, preflightReportRow{URL: toCheck[i].URL, Status: "accessible", Reason: "public listing reachable"})
 		case v.Access == bucket.AccessDenied:
 			denied++
-			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, "private (access denied)"})
+			reason := "private (access denied)"
+			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, reason})
+			report = append(report, preflightReportRow{URL: toCheck[i].URL, Status: "private", Reason: reason})
 		case v.Access == bucket.AccessMissing:
 			missing++
-			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, "missing (no such bucket/host)"})
+			reason := "missing (no such bucket/host)"
+			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, reason})
+			report = append(report, preflightReportRow{URL: toCheck[i].URL, Status: "missing", Reason: reason})
 		default:
 			errored++
 			reason := "errored"
@@ -662,12 +683,47 @@ func preflightFilter(ctx context.Context, a *app.App, specs []urlSpec, opt *opti
 				reason = "errored: " + v.Err.Error()
 			}
 			inaccessible = append(inaccessible, failedTarget{toCheck[i].URL, reason})
+			report = append(report, preflightReportRow{URL: toCheck[i].URL, Status: "errored", Reason: reason})
 		}
+	}
+	if err := writePreflightFile(opt.preflightFile, report, out, opt); err != nil {
+		return preflightResult{}, err
 	}
 	if !opt.quiet && !opt.json {
 		fmt.Fprintf(out, "Preflight summary: %d accessible, %d private, %d missing, %d errored",
 			public, denied, missing, errored)
 		fmt.Fprintf(out, " -> scanning %d/%d\n", len(kept), len(specs))
 	}
-	return preflightResult{kept: kept, inaccessible: inaccessible}, nil
+	return preflightResult{kept: kept, inaccessible: inaccessible, report: report}, nil
+}
+
+func writePreflightFile(path string, rows []preflightReportRow, out io.Writer, opt *options) error {
+	if path == "" {
+		return nil
+	}
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	w.Comma = '\t'
+	if err := w.Write([]string{"status", "url", "reason"}); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := w.Write([]string{row.Status, row.URL, row.Reason}); err != nil {
+			return err
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+	}
+	if !opt.quiet && !opt.json {
+		fmt.Fprintf(out, "Wrote %d preflight verdict(s) to %s\n", len(rows), path)
+	}
+	return nil
 }

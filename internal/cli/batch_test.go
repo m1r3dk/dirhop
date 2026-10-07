@@ -220,8 +220,12 @@ func TestScanParallelIndexesAllInOrder(t *testing.T) {
 // classification is covered by bucket.TestCheckAccess*.
 func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/pub/" {
+		switch r.URL.Path {
+		case "/pub/":
 			fmt.Fprint(w, `<title>Index of /pub</title><a href="a.zip">a.zip</a>`)
+			return
+		case "/private/":
+			http.Error(w, "private", http.StatusForbidden)
 			return
 		}
 		http.NotFound(w, r)
@@ -235,7 +239,8 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 	configPath := filepath.Join(tmp, "config.toml")
 	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
 	list := filepath.Join(tmp, "urls.txt")
-	_ = os.WriteFile(list, []byte(server.URL+"/pub/\n"+closedURL+"/dead/\n"), 0o600)
+	_ = os.WriteFile(list, []byte(server.URL+"/pub/\n"+server.URL+"/private/\n"+server.URL+"/missing/\n"+closedURL+"/dead/\n"), 0o600)
+	report := filepath.Join(tmp, "preflight.tsv")
 
 	run := func(args ...string) (string, error) {
 		var out bytes.Buffer
@@ -249,12 +254,25 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 		return out.String(), err
 	}
 
-	out, err := run("scan", "-f", list, "--preflight", "--parallel", "0")
+	out, err := run("scan", "-f", list, "--preflight", "--parallel", "0", "--preflight-file", report)
 	if err != nil {
 		t.Fatalf("preflight scan with a dead generic URL failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Preflight summary: 1 accessible") || !strings.Contains(out, "1 errored") || !strings.Contains(out, "scanning 1/2") {
+	if !strings.Contains(out, "Preflight summary: 1 accessible") || !strings.Contains(out, "1 private") || !strings.Contains(out, "1 missing") || !strings.Contains(out, "1 errored") || !strings.Contains(out, "scanning 1/4") {
 		t.Fatalf("expected a preflight summary line, got:\n%s", out)
+	}
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("preflight report was not written: %v", err)
+	}
+	reportText := string(data)
+	for _, want := range []string{"status\turl\treason", "accessible\t" + server.URL + "/pub/", "private\t" + server.URL + "/private/", "missing\t" + server.URL + "/missing/", "errored\t" + closedURL + "/dead/"} {
+		if !strings.Contains(reportText, want) {
+			t.Fatalf("preflight report missing %q:\n%s", want, reportText)
+		}
+	}
+	if !strings.Contains(out, "Wrote 4 preflight verdict(s) to "+report) {
+		t.Fatalf("expected preflight report notice, got:\n%s", out)
 	}
 	// The reachable non-bucket HTML listing was kept and actually indexed, while
 	// the closed generic URL was not allowed to fail the scan batch.

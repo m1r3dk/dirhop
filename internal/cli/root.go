@@ -26,21 +26,22 @@ import (
 )
 
 type options struct {
-	session     string
-	url         string
-	name        string
-	config      string
-	parallel    int
-	preflight   bool
-	noPreflight bool
-	forceRescan bool
-	failedFile  string
-	retryFailed bool
-	json        bool
-	quiet       bool
-	noColor     bool
-	verbose     bool
-	debug       bool
+	session       string
+	url           string
+	name          string
+	config        string
+	parallel      int
+	preflight     bool
+	noPreflight   bool
+	forceRescan   bool
+	failedFile    string
+	preflightFile string
+	retryFailed   bool
+	json          bool
+	quiet         bool
+	noColor       bool
+	verbose       bool
+	debug         bool
 }
 
 func Execute() error {
@@ -339,6 +340,7 @@ ignored, and an optional second field names the session:
 	cmd.Flags().BoolVar(&opt.noPreflight, "no-preflight", false, "disable the automatic preflight check for multi-target scans")
 	cmd.Flags().BoolVar(&opt.forceRescan, "rescan", false, "re-crawl buckets that were already scanned successfully (default skips them)")
 	cmd.Flags().StringVar(&opt.failedFile, "failed-file", "", "write targets that could not be scanned (private/missing/errored) to this file for retry")
+	cmd.Flags().StringVar(&opt.preflightFile, "preflight-file", filepath.Join(filepath.Dir(a.Config.Paths.Database), "preflight.tsv"), "write all preflight verdicts to this TSV file")
 	cmd.Flags().BoolVar(&opt.retryFailed, "retry-failed", false, "rescan sessions that previously failed, were cancelled, or never finished")
 	return cmd
 }
