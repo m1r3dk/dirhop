@@ -7,6 +7,8 @@ package bucket
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -250,6 +252,10 @@ func (a Access) String() string {
 // per bucket instead of a full crawl, and dead hosts fail fast on their own
 // timeout. The HTTP client's own timeout bounds how long a slow host can block.
 func CheckAccess(ctx context.Context, client Doer, t Target, userAgent string) (Access, error) {
+	return checkAccess(ctx, client, t, userAgent, true)
+}
+
+func checkAccess(ctx context.Context, client Doer, t Target, userAgent string, allowHTTPFallback bool) (Access, error) {
 	u := *t.Endpoint
 	q := url.Values{}
 	if t.Provider == Azure {
@@ -276,6 +282,13 @@ func CheckAccess(ctx context.Context, client Doer, t Target, userAgent string) (
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if allowHTTPFallback && t.Provider != Azure && t.Endpoint.Scheme == "https" && isTLSError(err) {
+			fallback := t
+			endpoint := *t.Endpoint
+			endpoint.Scheme = "http"
+			fallback.Endpoint = &endpoint
+			return checkAccess(ctx, client, fallback, userAgent, false)
+		}
 		// Transport-level failure. A DNS "no such host" is a definitive miss;
 		// anything else (timeout, reset) is an inconclusive error.
 		if isNoSuchHost(err) {
@@ -303,6 +316,27 @@ func CheckAccess(ctx context.Context, client Doer, t Target, userAgent string) (
 	default:
 		return AccessError, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
+}
+
+func isTLSError(err error) bool {
+	var unknown x509.UnknownAuthorityError
+	if errors.As(err, &unknown) {
+		return true
+	}
+	var hostname x509.HostnameError
+	if errors.As(err, &hostname) {
+		return true
+	}
+	var invalid x509.CertificateInvalidError
+	if errors.As(err, &invalid) {
+		return true
+	}
+	var verify *tls.CertificateVerificationError
+	if errors.As(err, &verify) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "certificate") || strings.Contains(msg, "tls") || strings.Contains(msg, "ssl") || strings.Contains(msg, "http response to https client")
 }
 
 // isNoSuchHost reports whether err is a DNS "no such host" lookup failure.

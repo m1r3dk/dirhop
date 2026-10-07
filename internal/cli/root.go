@@ -340,7 +340,7 @@ ignored, and an optional second field names the session:
 	cmd.Flags().BoolVar(&opt.noPreflight, "no-preflight", false, "disable the automatic preflight check for multi-target scans")
 	cmd.Flags().BoolVar(&opt.forceRescan, "rescan", false, "re-crawl buckets that were already scanned successfully (default skips them)")
 	cmd.Flags().StringVar(&opt.failedFile, "failed-file", "", "write targets that could not be scanned (private/missing/errored) to this file for retry")
-	cmd.Flags().StringVar(&opt.preflightFile, "preflight-file", filepath.Join(filepath.Dir(a.Config.Paths.Database), "preflight.tsv"), "write all preflight verdicts to this TSV file")
+	cmd.Flags().StringVar(&opt.preflightFile, "preflight-file", filepath.Join(filepath.Dir(a.Config.Paths.Database), "preflight.md"), "write a readable preflight report with every target verdict")
 	cmd.Flags().BoolVar(&opt.retryFailed, "retry-failed", false, "rescan sessions that previously failed, were cancelled, or never finished")
 	return cmd
 }

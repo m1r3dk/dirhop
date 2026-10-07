@@ -24,9 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   e.g. `wustl` instead of `wustl-s3-us-west-2-amazonaws-com`. Non-bucket sites
   keep host-based names. `session normalize-names` renames existing sessions to
   the new scheme, keeping names unique.
-- Preflight writes a TSV report after each run (default `preflight.tsv` next to
-  the database, override with `--preflight-file PATH`) with every checked target
-  classified as `accessible`, `private`, `missing`, `errored`, or
+- Preflight writes a readable Markdown report after each run (default
+  `preflight.md` next to the database, override with `--preflight-file PATH`).
+  It includes a summary, status explanations, suggested next steps, and grouped
+  target tables for `accessible`, `private`, `missing`, `errored`, and
   `already_scanned`.
 - Multi-target `scan` runs preflight automatically and offers `--no-preflight`
   when every target should be attempted regardless of the cheap check.

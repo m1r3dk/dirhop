@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/csv"
 	"fmt"
 	"io"
 	"net/url"
@@ -701,29 +700,71 @@ func writePreflightFile(path string, rows []preflightReportRow, out io.Writer, o
 	if path == "" {
 		return nil
 	}
-	var b strings.Builder
-	w := csv.NewWriter(&b)
-	w.Comma = '\t'
-	if err := w.Write([]string{"status", "url", "reason"}); err != nil {
-		return err
-	}
-	for _, row := range rows {
-		if err := w.Write([]string{row.Status, row.URL, row.Reason}); err != nil {
-			return err
-		}
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return err
-	}
+	report := formatPreflightReport(rows, time.Now())
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(report), 0o600); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
 	if !opt.quiet && !opt.json {
-		fmt.Fprintf(out, "Wrote %d preflight verdict(s) to %s\n", len(rows), path)
+		fmt.Fprintf(out, "Wrote readable preflight report for %d target(s) to %s\n", len(rows), path)
 	}
 	return nil
+}
+
+func formatPreflightReport(rows []preflightReportRow, generatedAt time.Time) string {
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[row.Status]++
+	}
+	scanCount := counts["accessible"] + counts["already_scanned"]
+	var b strings.Builder
+	fmt.Fprintf(&b, "# dirhop preflight report\n")
+	fmt.Fprintf(&b, "Generated: %s\n\n", generatedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "## Summary\n")
+	fmt.Fprintf(&b, "- Total targets checked: %d\n", len(rows))
+	fmt.Fprintf(&b, "- Will scan or skip as already indexed: %d\n", scanCount)
+	fmt.Fprintf(&b, "- Accessible and will be scanned: %d\n", counts["accessible"])
+	fmt.Fprintf(&b, "- Already scanned and will be skipped: %d\n", counts["already_scanned"])
+	fmt.Fprintf(&b, "- Private and skipped: %d\n", counts["private"])
+	fmt.Fprintf(&b, "- Missing and skipped: %d\n", counts["missing"])
+	fmt.Fprintf(&b, "- Errored and skipped: %d\n\n", counts["errored"])
+
+	fmt.Fprintf(&b, "## How to read this\n")
+	fmt.Fprintf(&b, "- accessible: public listing worked, so dirhop will crawl it now.\n")
+	fmt.Fprintf(&b, "- already_scanned: this target already has a completed index, so dirhop will not crawl it unless you pass --rescan.\n")
+	fmt.Fprintf(&b, "- private: the server said access is denied. You need credentials or the bucket must be made listable.\n")
+	fmt.Fprintf(&b, "- missing: bucket, host, or path was not found. Check spelling, region, provider, and whether it was deleted.\n")
+	fmt.Fprintf(&b, "- errored: dirhop could not complete the cheap check. Retry later or inspect the reason below.\n\n")
+
+	fmt.Fprintf(&b, "## Suggested next steps\n")
+	fmt.Fprintf(&b, "- To scan only failures again, copy private/missing/errored URLs into a new file or use --failed-file during scan.\n")
+	fmt.Fprintf(&b, "- To force completed sessions to run again, use --rescan.\n")
+	fmt.Fprintf(&b, "- For private buckets, verify access policy or use an authenticated workflow outside this public-listing scan.\n\n")
+
+	for _, status := range []string{"accessible", "already_scanned", "private", "missing", "errored"} {
+		fmt.Fprintf(&b, "## %s (%d)\n", status, counts[status])
+		fmt.Fprintf(&b, "| URL | Reason |\n| --- | --- |\n")
+		wrote := false
+		for _, row := range rows {
+			if row.Status != status {
+				continue
+			}
+			wrote = true
+			fmt.Fprintf(&b, "| %s | %s |\n", markdownCell(row.URL), markdownCell(row.Reason))
+		}
+		if !wrote {
+			fmt.Fprintf(&b, "| _none_ | |\n")
+		}
+		fmt.Fprintln(&b)
+	}
+	return b.String()
+}
+
+func markdownCell(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return s
 }

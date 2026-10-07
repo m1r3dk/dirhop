@@ -240,7 +240,7 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 	_ = os.WriteFile(configPath, []byte("database = \""+filepath.Join(tmp, "db")+"\"\nretries = 0\n"), 0o600)
 	list := filepath.Join(tmp, "urls.txt")
 	_ = os.WriteFile(list, []byte(server.URL+"/pub/\n"+server.URL+"/private/\n"+server.URL+"/missing/\n"+closedURL+"/dead/\n"), 0o600)
-	report := filepath.Join(tmp, "preflight.tsv")
+	report := filepath.Join(tmp, "preflight.md")
 
 	run := func(args ...string) (string, error) {
 		var out bytes.Buffer
@@ -266,12 +266,30 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 		t.Fatalf("preflight report was not written: %v", err)
 	}
 	reportText := string(data)
-	for _, want := range []string{"status\turl\treason", "accessible\t" + server.URL + "/pub/", "private\t" + server.URL + "/private/", "missing\t" + server.URL + "/missing/", "errored\t" + closedURL + "/dead/"} {
+	for _, want := range []string{
+		"# dirhop preflight report",
+		"## Summary",
+		"- Total targets checked: 4",
+		"- Accessible and will be scanned: 1",
+		"- Private and skipped: 1",
+		"- Missing and skipped: 1",
+		"- Errored and skipped: 1",
+		"## How to read this",
+		"## Suggested next steps",
+		"## accessible (1)",
+		"| " + server.URL + "/pub/ | public listing reachable |",
+		"## private (1)",
+		"| " + server.URL + "/private/ | private (access denied) |",
+		"## missing (1)",
+		"| " + server.URL + "/missing/ | missing (no such bucket/host) |",
+		"## errored (1)",
+		"| " + closedURL + "/dead/ | errored:",
+	} {
 		if !strings.Contains(reportText, want) {
 			t.Fatalf("preflight report missing %q:\n%s", want, reportText)
 		}
 	}
-	if !strings.Contains(out, "Wrote 4 preflight verdict(s) to "+report) {
+	if !strings.Contains(out, "Wrote readable preflight report for 4 target(s) to "+report) {
 		t.Fatalf("expected preflight report notice, got:\n%s", out)
 	}
 	// The reachable non-bucket HTML listing was kept and actually indexed, while

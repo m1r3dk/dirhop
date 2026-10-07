@@ -122,6 +122,27 @@ func TestCheckAccessClassifies(t *testing.T) {
 	}
 }
 
+func TestCheckAccessFallsBackToHTTPOnHTTPSFailure(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("max-keys") != "1" {
+			t.Errorf("fallback did not keep max-keys=1: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `<ListBucketResult></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(strings.Replace(server.URL, "http://", "https://", 1) + "/")
+	got, err := CheckAccess(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua")
+	if got != AccessPublic || err != nil {
+		t.Fatalf("CheckAccess = %v, %v; want public after HTTP fallback", got, err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("HTTP fallback server saw %d requests, want 1", hits.Load())
+	}
+}
+
 // A dead host (DNS failure) must classify as missing, not a generic error, so
 // preflight can drop it with confidence.
 func TestCheckAccessDeadHostIsMissing(t *testing.T) {
