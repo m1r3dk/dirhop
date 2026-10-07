@@ -292,6 +292,30 @@ func TestScanPreflightChecksGenericURLsAndSummarizes(t *testing.T) {
 	if !strings.Contains(out, "Wrote readable preflight report for 4 target(s) to "+report) {
 		t.Fatalf("expected preflight report notice, got:\n%s", out)
 	}
+	for _, tc := range []struct {
+		suffix string
+		want   string
+	}{
+		{"private", server.URL + "/private/  # private (access denied)"},
+		{"missing", server.URL + "/missing/  # missing (no such bucket/host)"},
+		{"errored", closedURL + "/dead/  # errored:"},
+		{"failed", server.URL + "/private/  # private (access denied)"},
+		{"failed", server.URL + "/missing/  # missing (no such bucket/host)"},
+		{"failed", closedURL + "/dead/  # errored:"},
+	} {
+		path := strings.TrimSuffix(report, filepath.Ext(report)) + "-" + tc.suffix + ".txt"
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s status log was not written: %v", tc.suffix, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "# dirhop preflight "+tc.suffix+" targets") || !strings.Contains(text, tc.want) {
+			t.Fatalf("%s status log missing useful content %q:\n%s", tc.suffix, tc.want, text)
+		}
+	}
+	if !strings.Contains(out, "Wrote separate preflight logs:") {
+		t.Fatalf("expected separate log notice, got:\n%s", out)
+	}
 	// The reachable non-bucket HTML listing was kept and actually indexed, while
 	// the closed generic URL was not allowed to fail the scan batch.
 	if ls, err := run("sessions"); err != nil || !strings.Contains(ls, "127.0.0.1") {

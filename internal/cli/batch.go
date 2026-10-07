@@ -707,10 +707,57 @@ func writePreflightFile(path string, rows []preflightReportRow, out io.Writer, o
 	if err := os.WriteFile(path, []byte(report), 0o600); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
+	statusFiles, err := writePreflightStatusFiles(path, rows)
+	if err != nil {
+		return err
+	}
 	if !opt.quiet && !opt.json {
 		fmt.Fprintf(out, "Wrote readable preflight report for %d target(s) to %s\n", len(rows), path)
+		if len(statusFiles) > 0 {
+			fmt.Fprintf(out, "Wrote separate preflight logs: %s\n", strings.Join(statusFiles, ", "))
+		}
 	}
 	return nil
+}
+
+func writePreflightStatusFiles(reportPath string, rows []preflightReportRow) ([]string, error) {
+	groups := map[string][]preflightReportRow{}
+	for _, row := range rows {
+		switch row.Status {
+		case "private", "missing", "errored":
+			groups[row.Status] = append(groups[row.Status], row)
+			groups["failed"] = append(groups["failed"], row)
+		}
+	}
+	base := strings.TrimSuffix(reportPath, filepath.Ext(reportPath))
+	var written []string
+	for _, status := range []string{"private", "missing", "errored", "failed"} {
+		path := base + "-" + status + ".txt"
+		if len(groups[status]) == 0 {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+			}
+			continue
+		}
+		content := formatPreflightStatusLog(status, groups[status])
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidArguments, err)
+		}
+		written = append(written, path)
+	}
+	return written, nil
+}
+
+func formatPreflightStatusLog(status string, rows []preflightReportRow) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# dirhop preflight %s targets\n", status)
+	fmt.Fprintf(&b, "# Count: %d\n", len(rows))
+	fmt.Fprintf(&b, "# Format: URL  # reason\n")
+	fmt.Fprintf(&b, "# This file can be copied into `dirhop scan -f FILE` because comments are ignored.\n\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s  # %s\n", row.URL, strings.ReplaceAll(row.Reason, "\n", " "))
+	}
+	return b.String()
 }
 
 func formatPreflightReport(rows []preflightReportRow, generatedAt time.Time) string {

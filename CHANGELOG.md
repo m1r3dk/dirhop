@@ -26,9 +26,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the new scheme, keeping names unique.
 - Preflight writes a readable Markdown report after each run (default
   `preflight.md` next to the database, override with `--preflight-file PATH`).
-  It includes a summary, status explanations, suggested next steps, and grouped
-  target tables for `accessible`, `private`, `missing`, `errored`, and
-  `already_scanned`.
+  It includes a summary, status explanations, suggested next steps, grouped
+  target tables, and separate `preflight-private.txt`, `preflight-missing.txt`,
+  `preflight-errored.txt`, and `preflight-failed.txt` files for focused review
+  or retry lists.
 - Multi-target `scan` runs preflight automatically and offers `--no-preflight`
   when every target should be attempted regardless of the cheap check.
 - Re-running `scan` on a list skips buckets that already completed successfully
