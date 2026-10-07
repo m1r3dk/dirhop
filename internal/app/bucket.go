@@ -117,6 +117,14 @@ func isNoSuchHost(err error) bool {
 // or Azure Blob) via its paginated listing API. Keys map to files; every key
 // prefix (and every zero-byte "dir/" placeholder) maps to a directory, so
 // buckets browse like any other listing.
+//
+// The scan is crash-safe: objects arrive in lexicographic key order and the
+// greatest committed key is persisted as a checkpoint after every page, so an
+// interrupted scan (Ctrl-C, crash, network loss) keeps everything already
+// indexed and the next run resumes strictly after the last checkpointed key
+// instead of re-listing the bucket from the start. The checkpoint also pins the
+// original scan start time so post-scan reconciliation never reaps entries that
+// an earlier segment of the same logical scan indexed.
 func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.Target, run *model.CrawlRun) error {
 	root, err := a.DB.EntryByPath(ctx, site.ID, "/", false)
 	if err != nil {
@@ -125,9 +133,21 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 	if err := a.DB.SetSiteParser(ctx, site.ID, string(target.Provider)); err != nil {
 		return err
 	}
+
+	// Resume if a prior scan of this site was interrupted: continue after the
+	// last checkpointed key and keep the original scan start so reconciliation
+	// does not treat earlier-indexed entries as stale.
+	startAfter, startedAt, resuming, err := a.DB.ScanCheckpoint(ctx, site.ID)
+	if err != nil {
+		return err
+	}
+	if resuming && !startedAt.IsZero() {
+		run.StartedAt = startedAt
+	}
+	seen := run.StartedAt
+
 	// ponytail: directory-ID map grows with directory count, not object count.
 	dirs := map[string]int64{"/": root.ID}
-	seen := run.StartedAt
 	root.LastSeenAt = seen
 	if _, err := a.DB.UpsertEntriesNoRecount(ctx, []model.Entry{*root}); err != nil {
 		return err
@@ -159,16 +179,13 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 		return nil
 	}
 
-	// Walk serializes callbacks, so ensureDir/dirs need no extra locking.
-	workers := a.bucketWorkers(site)
-	_, err = bucket.Walk(ctx, a.HTTP, target, a.Config.UserAgent, workers, func(objects []bucket.Object, prefixes []string) error {
-		for _, p := range prefixes {
-			virtual := path.Clean("/" + strings.TrimPrefix(p, target.Prefix))
-			run.CurrentPath = virtual
-			if err := ensureDir(virtual); err != nil {
-				return err
-			}
-		}
+	// Strictly sequential listing in key order gives one monotonic cursor to
+	// checkpoint. A page is fully downloaded before its callback runs, so it is
+	// committed with a non-cancellable context: an interruption (Ctrl-C, ctx
+	// deadline) then keeps the work already fetched instead of discarding it,
+	// and the saved cursor lets the next run resume right after it.
+	_, err = bucket.ListResumable(ctx, a.HTTP, target, a.Config.UserAgent, startAfter, func(objects []bucket.Object, cursor string) error {
+		commitCtx := context.WithoutCancel(ctx)
 		batch := make([]model.Entry, 0, len(objects))
 		for _, o := range objects {
 			rel := strings.TrimPrefix(o.Key, target.Prefix)
@@ -203,15 +220,33 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 			run.Files++
 			run.Bytes += size
 		}
-		_, err := a.DB.UpsertEntriesNoRecount(ctx, batch)
+		if _, err := a.DB.UpsertEntriesNoRecount(commitCtx, batch); err != nil {
+			return err
+		}
+		// Persist the resume point only after the page's entries are durably
+		// committed, so the cursor never advances past unindexed keys.
+		if cursor != "" {
+			if err := a.DB.SaveScanCheckpoint(commitCtx, site.ID, cursor, run.StartedAt); err != nil {
+				return err
+			}
+		}
 		a.report(run)
-		return err
+		// Surface interruption after the page is safely persisted, so the scan
+		// stops promptly but loses no already-fetched work.
+		return ctx.Err()
 	})
 	if errors.Is(err, bucket.ErrAccessDenied) {
 		return fmt.Errorf("%w: %v", ErrUnsupportedListing, err)
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("%w: %v", ErrNetwork, err)
+	}
+	if err == nil {
+		// Scan ran to completion: drop the checkpoint so the next scan starts
+		// fresh instead of resuming from the final key.
+		if clearErr := a.DB.ClearScanCheckpoint(context.WithoutCancel(ctx), site.ID); clearErr != nil {
+			return clearErr
+		}
 	}
 	return err
 }

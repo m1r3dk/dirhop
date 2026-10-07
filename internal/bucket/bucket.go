@@ -215,6 +215,19 @@ func List(ctx context.Context, client Doer, t Target, userAgent string, page fun
 	return rangeLister(t)(ctx, client, t, task{prefix: t.Prefix}, userAgent, func(objs []Object, _ []string, _ string, _ bool) error { return page(objs) })
 }
 
+// ListResumable streams every object under t.Prefix in lexicographic key order,
+// starting strictly after startAfter (pass "" to start from the beginning). It
+// is the resumable, strictly sequential listing used for crash-safe scans: keys
+// arrive in sorted order and page receives the greatest key committed so far, so
+// a caller can persist that key as a checkpoint and resume from it later without
+// re-listing earlier keys or missing any. Unlike Walk it does not parallelize,
+// trading throughput for a single monotonic cursor.
+func ListResumable(ctx context.Context, client Doer, t Target, userAgent, startAfter string, page func(objs []Object, cursor string) error) (pages int, err error) {
+	return rangeLister(t)(ctx, client, t, task{prefix: t.Prefix, startAfter: startAfter}, userAgent, func(objs []Object, _ []string, last string, _ bool) error {
+		return page(objs, last)
+	})
+}
+
 // Access is the outcome of a preflight accessibility check.
 type Access int
 

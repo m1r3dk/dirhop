@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS crawl_errors (
  message TEXT NOT NULL,
  created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_checkpoints (
+ site_id INTEGER PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+ cursor TEXT NOT NULL DEFAULT '',
+ started_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS downloads (
  id INTEGER PRIMARY KEY,
  site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -91,5 +97,6 @@ CREATE INDEX IF NOT EXISTS idx_entries_size ON entries(site_id, size);
 CREATE INDEX IF NOT EXISTS idx_entries_modified ON entries(site_id, modified_at);
 CREATE INDEX IF NOT EXISTS idx_crawl_runs_site ON crawl_runs(site_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_crawl_errors_run ON crawl_errors(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_scan_checkpoints_updated ON scan_checkpoints(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_downloads_site ON downloads(site_id, updated_at DESC);
 `

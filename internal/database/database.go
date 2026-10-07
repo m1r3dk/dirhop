@@ -778,6 +778,47 @@ func (d *DB) ListCrawlErrors(ctx context.Context, siteID int64, limit int) ([]mo
 	return out, rows.Err()
 }
 
+// SaveScanCheckpoint durably records how far a bucket scan has progressed so an
+// interrupted run can resume from cursor instead of re-listing from the start.
+// cursor is the greatest object key safely committed to the index; startedAt is
+// the logical start time of the scan, preserved across resumes so reconciliation
+// never reaps entries indexed by an earlier segment of the same scan.
+func (d *DB) SaveScanCheckpoint(ctx context.Context, siteID int64, cursor string, startedAt time.Time) error {
+	if siteID == 0 {
+		return errors.New("invalid site id")
+	}
+	defer d.lockWrite()()
+	return d.withBusyRetry(ctx, func() error {
+		_, err := d.sql.ExecContext(ctx, `INSERT INTO scan_checkpoints(site_id,cursor,started_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(site_id) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at`, siteID, cursor, unix(startedAt), unix(time.Now()))
+		return err
+	})
+}
+
+// ScanCheckpoint returns the saved resume cursor and original scan start time for
+// a site. ok is false when no checkpoint exists, meaning a scan should start from
+// the beginning.
+func (d *DB) ScanCheckpoint(ctx context.Context, siteID int64) (cursor string, startedAt time.Time, ok bool, err error) {
+	row := d.sql.QueryRowContext(ctx, `SELECT cursor,started_at FROM scan_checkpoints WHERE site_id=?`, siteID)
+	var started int64
+	switch err = row.Scan(&cursor, &started); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", time.Time{}, false, nil
+	case err != nil:
+		return "", time.Time{}, false, err
+	default:
+		return cursor, fromUnix(started), true, nil
+	}
+}
+
+// ClearScanCheckpoint removes a site's resume cursor once a scan completes.
+func (d *DB) ClearScanCheckpoint(ctx context.Context, siteID int64) error {
+	defer d.lockWrite()()
+	return d.withBusyRetry(ctx, func() error {
+		_, err := d.sql.ExecContext(ctx, `DELETE FROM scan_checkpoints WHERE site_id=?`, siteID)
+		return err
+	})
+}
+
 // ListDownloads returns recent download records for a site, newest first.
 func (d *DB) ListDownloads(ctx context.Context, siteID int64, limit int) ([]model.Download, error) {
 	if limit <= 0 {

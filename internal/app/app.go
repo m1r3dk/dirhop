@@ -51,16 +51,6 @@ func (a *App) crawlWorkers(_ *model.Site) int {
 	return max(a.Config.CrawlConcurrency, 1)
 }
 
-// bucketWorkers: S3/GCS list endpoints are built for high request rates and
-// each page is ~0.5s of pure latency, so default to 4x crawl concurrency.
-// Measured on a 77k-object GCS bucket: 8 workers 62s, 16 51s, 32 40s.
-func (a *App) bucketWorkers(site *model.Site) int {
-	if a.Workers > 0 {
-		return min(a.Workers, 64)
-	}
-	return min(a.crawlWorkers(site)*4, 32)
-}
-
 func (a *App) report(run *model.CrawlRun) {
 	if a.Progress != nil {
 		a.Progress(*run)
