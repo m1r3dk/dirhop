@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/term"
 
@@ -51,5 +53,29 @@ func TestProgressPrinterSilentWhenNotTerminal(t *testing.T) {
 	terminal := term.NewTerminal(&bytes.Buffer{}, "")
 	if update, _ := progressPrinter(terminal, true); update != nil {
 		t.Error("progress printer should be silent when quiet is set")
+	}
+}
+
+func TestBatchProgressShowsRowsWithCurrentPaths(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	progress := newBatchProgress(&buf, &mu)
+
+	mu.Lock()
+	progress.startLocked(0, "alpha")
+	progress.startLocked(1, "beta")
+	mu.Unlock()
+	progress.update(model.CrawlRun{SiteID: 10, TargetName: "alpha", CurrentPath: "/orders/a.zip", Directories: 4, Files: 100, Bytes: 2048})
+	progress.lastDraw = time.Now().Add(-time.Second)
+	progress.update(model.CrawlRun{SiteID: 11, TargetName: "beta", CurrentPath: "/logs/2024/", Directories: 2, Files: 7, Bytes: 512})
+
+	out := buf.String()
+	for _, want := range []string{"alpha", "/orders/a.zip", "dirs=4", "files=100", "beta", "/logs/2024/"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("batch progress missing %q in:\n%q", want, out)
+		}
+	}
+	if strings.Contains(out, "(+") {
+		t.Fatalf("batch progress should render per-target rows, not a summarized footer:\n%q", out)
 	}
 }

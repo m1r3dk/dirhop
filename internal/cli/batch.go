@@ -152,15 +152,8 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 	results := make([]batchResult, len(specs))
 	errs := make([]error, len(specs))
 	single := len(specs) == 1
-	if !single {
-		// Per-crawl progress uses carriage returns. During a batch, several crawls
-		// can update it while result lines are printed, which makes output look like
-		// "Directories... [202/33820] Indexed..." on one line. Batch scans already
-		// have [done/total] result lines, so keep that as the only progress signal.
-		savedProgress := a.Progress
-		a.Progress = nil
-		defer func() { a.Progress = savedProgress }()
-	}
+	savedProgress := a.Progress
+	defer func() { a.Progress = savedProgress }()
 
 	// indexOne runs the full open/crawl/enrich pipeline for one spec and returns
 	// its result plus the typed error (kept so exit codes stay meaningful). It
@@ -204,61 +197,32 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 
 	var printMu sync.Mutex
 	var done atomic.Int64
-	// Live "currently crawling" footer. Batch output prints one result line per
-	// finished bucket; this adds a single redrawn line under them showing which
-	// buckets are in flight right now, so a long-running big bucket does not look
-	// like a stall. Terminal-only, so pipes/files/JSON stay clean.
-	showFooter := !opt.quiet && !opt.json && len(specs) > 1 && isTerminalWriter(out)
-	inflight := map[int]string{}
-	footerShown := false
-	clearFooter := func() { // caller holds printMu
-		if footerShown {
-			fmt.Fprint(out, "\r\x1b[K")
-			footerShown = false
-		}
-	}
-	drawFooter := func() { // caller holds printMu
-		if !showFooter || len(inflight) == 0 {
-			return
-		}
-		labels := make([]string, 0, len(inflight))
-		for _, l := range inflight {
-			labels = append(labels, l)
-		}
-		sort.Strings(labels)
-		const maxShown = 4
-		shown := labels
-		extra := 0
-		if len(shown) > maxShown {
-			extra = len(shown) - maxShown
-			shown = shown[:maxShown]
-		}
-		line := "crawling " + strings.Join(shown, ", ")
-		if extra > 0 {
-			line += fmt.Sprintf(" (+%d more)", extra)
-		}
-		fmt.Fprintf(out, "\r\x1b[K%s", line)
-		footerShown = true
+	// Docker-style live rows. Batch output prints one result line per finished
+	// bucket; this redrawn block sits under those lines and shows each active
+	// target plus the path it has reached. Terminal-only, so pipes/files/JSON stay
+	// clean.
+	showProgress := !opt.quiet && !opt.json && len(specs) > 1 && isTerminalWriter(out)
+	progressRows := newBatchProgress(out, &printMu)
+	if showProgress {
+		a.Progress = progressRows.update
+	} else if !single {
+		a.Progress = nil
 	}
 	startInflight := func(i int, label string) {
-		if !showFooter {
+		if !showProgress {
 			return
 		}
 		printMu.Lock()
 		defer printMu.Unlock()
-		inflight[i] = label
-		clearFooter()
-		drawFooter()
+		progressRows.startLocked(i, label)
 	}
 	endInflight := func(i int) {
-		if !showFooter {
+		if !showProgress {
 			return
 		}
 		printMu.Lock()
 		defer printMu.Unlock()
-		delete(inflight, i)
-		clearFooter()
-		drawFooter()
+		progressRows.endLocked(i)
 	}
 	report := func(i int, spec urlSpec, res batchResult) {
 		if opt.quiet || opt.json {
@@ -266,7 +230,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		}
 		printMu.Lock()
 		defer printMu.Unlock()
-		clearFooter()
+		progressRows.clearLocked()
 		prefix := ""
 		if len(specs) > 1 {
 			// With concurrency, finish order is not input order, so count
@@ -283,7 +247,7 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		default:
 			fmt.Fprintf(out, "%sIndexed %s: %d files, %s\n", prefix, res.Session, res.Files, output.Size(res.Bytes))
 		}
-		drawFooter()
+		progressRows.drawLocked()
 	}
 
 	if workers == 1 {
@@ -322,9 +286,9 @@ func indexURLs(ctx context.Context, a *app.App, specs []urlSpec, rescan bool, me
 		close(jobs)
 		wg.Wait()
 	}
-	if showFooter {
+	if showProgress {
 		printMu.Lock()
-		clearFooter()
+		progressRows.clearLocked()
 		printMu.Unlock()
 	}
 
@@ -390,6 +354,143 @@ func targetLabel(rawURL string) string {
 		return u.Hostname()
 	}
 	return rawURL
+}
+
+type batchProgressRow struct {
+	label string
+	run   model.CrawlRun
+	start time.Time
+}
+
+type batchProgress struct {
+	out       io.Writer
+	mu        *sync.Mutex
+	rows      map[int]batchProgressRow
+	bySiteID  map[int64]int
+	lineCount int
+	lastDraw  time.Time
+}
+
+func newBatchProgress(out io.Writer, mu *sync.Mutex) *batchProgress {
+	return &batchProgress{out: out, mu: mu, rows: map[int]batchProgressRow{}, bySiteID: map[int64]int{}}
+}
+
+func (p *batchProgress) startLocked(i int, label string) {
+	p.clearLocked()
+	p.rows[i] = batchProgressRow{label: label, run: model.CrawlRun{TargetName: label, CurrentPath: "waiting"}, start: time.Now()}
+	p.drawLocked()
+}
+
+func (p *batchProgress) endLocked(i int) {
+	p.clearLocked()
+	if row, ok := p.rows[i]; ok && row.run.SiteID != 0 {
+		delete(p.bySiteID, row.run.SiteID)
+	}
+	delete(p.rows, i)
+	p.drawLocked()
+}
+
+func (p *batchProgress) update(run model.CrawlRun) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if time.Since(p.lastDraw) < 125*time.Millisecond {
+		return
+	}
+	idx, ok := p.bySiteID[run.SiteID]
+	if !ok {
+		idx = p.rowIndexForRunLocked(run)
+		if run.SiteID != 0 {
+			p.bySiteID[run.SiteID] = idx
+		}
+	}
+	row := p.rows[idx]
+	if row.start.IsZero() {
+		row.start = time.Now()
+	}
+	if run.TargetName != "" {
+		row.label = run.TargetName
+	}
+	row.run = run
+	p.rows[idx] = row
+	p.clearLocked()
+	p.drawLocked()
+	p.lastDraw = time.Now()
+}
+
+func (p *batchProgress) rowIndexForRunLocked(run model.CrawlRun) int {
+	if run.TargetName != "" {
+		for idx, row := range p.rows {
+			if row.label == run.TargetName || row.run.TargetName == run.TargetName {
+				return idx
+			}
+		}
+	}
+	idx := 0
+	for {
+		if _, exists := p.rows[idx]; !exists {
+			return idx
+		}
+		idx++
+	}
+}
+
+func (p *batchProgress) clearLocked() {
+	if p.lineCount == 0 {
+		return
+	}
+	for i := 0; i < p.lineCount; i++ {
+		fmt.Fprint(p.out, "\r\x1b[K")
+		if i < p.lineCount-1 {
+			fmt.Fprint(p.out, "\x1b[1A")
+		}
+	}
+	p.lineCount = 0
+}
+
+func (p *batchProgress) drawLocked() {
+	if len(p.rows) == 0 {
+		return
+	}
+	keys := make([]int, 0, len(p.rows))
+	for k := range p.rows {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	lines := make([]string, 0, len(keys))
+	now := time.Now()
+	for _, k := range keys {
+		row := p.rows[k]
+		lines = append(lines, formatBatchProgressRow(row, now))
+	}
+	for i, line := range lines {
+		if i > 0 {
+			fmt.Fprint(p.out, "\n")
+		}
+		fmt.Fprintf(p.out, "\r\x1b[K%s", line)
+	}
+	p.lineCount = len(lines)
+}
+
+func formatBatchProgressRow(row batchProgressRow, now time.Time) string {
+	run := row.run
+	label := row.label
+	if label == "" {
+		label = run.TargetName
+	}
+	if label == "" {
+		label = "target"
+	}
+	where := run.CurrentPath
+	if where == "" {
+		where = "starting"
+	}
+	elapsed := now.Sub(row.start).Seconds()
+	if elapsed < 0.001 {
+		elapsed = 0.001
+	}
+	rate := float64(run.Directories) / elapsed
+	return fmt.Sprintf("%-22s %s  dirs=%d files=%d size=%s errors=%d %.0f dirs/s",
+		truncateMiddle(label, 22), truncateMiddle(where, 70), run.Directories, run.Files, output.Size(run.Bytes), run.ErrorCount, rate)
 }
 
 // writeFailedFile records inaccessible/failed targets to a file so a large run

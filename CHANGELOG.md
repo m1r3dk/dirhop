@@ -58,9 +58,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of failing quickly with `SQLITE_BUSY`; scan entry writes also retry
   busy transactions with backoff.
 - Scans now show live crawl location in terminals: single-target crawls render
-  `Crawling: bucket:/path`, and multi-bucket scans also keep a live
-  "crawling ..." footer naming buckets currently in flight. Pipes, files, and
-  `--json` stay clean.
+  `Crawling: bucket:/path`; multi-target scans render Docker-style live rows
+  with one active bucket per line, including the path reached, directory/file
+  counters, size, errors, and rate. Pipes, files, and `--json` stay clean.
 - Preflight is much faster and no longer floods the network: it uses a dedicated
   client with a short per-probe timeout (default 8s, `preflight_timeout` in
   config) and zero retries, so each target is checked with exactly one request
