@@ -25,6 +25,8 @@ used. Unknown keys are rejected so typos are caught. Aliases `workers`,
 Common keys:
 
 - `database` - path to the SQLite index
+- `shard_dir` - directory holding entry shards (default: `shards/` beside the database)
+- `shard_count` - number of entry-storage shards, 1-32, default 16 (see below)
 - `crawl_concurrency` / `workers` - default crawl/bucket worker base
 - `download_workers`
 - `http_timeout` / `timeout`
@@ -33,6 +35,18 @@ Common keys:
 - `metadata` - `minimal`, `normal`, or `full`
 - `user_agent`
 - `grayhatwarfare_api_key` - see [[GrayHatWarfare]]
+
+## Shard count
+
+To index very large numbers of buckets without every scan serializing on
+SQLite's single writer, entries are distributed across a fixed set of shard
+databases. `shard_count` sets how many (1-32, default 16). Pick a value near your
+scan parallelism (16-20 is typical, up to 32).
+
+It is fixed for a dataset once chosen: each bucket's shard assignment is stored,
+so changing `shard_count` later does not silently remap existing data (a future
+re-shard tool will handle that explicitly). See
+`docs/adr/0001-sharded-storage.md` for the full design.
 
 ## Environment variables
 

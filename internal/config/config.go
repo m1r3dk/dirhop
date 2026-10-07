@@ -13,12 +13,22 @@ import (
 
 const AppName = "dirhop"
 
+// Shard-count bounds. These mirror internal/shard (the authority on routing) but
+// are duplicated here so the low-level config package stays dependency-free. A
+// test asserts they stay in sync with internal/shard.
+const (
+	minShardCount     = 1
+	maxShardCount     = 32
+	defaultShardCount = 16
+)
+
 // Paths contains all application-owned paths.
 type Paths struct {
 	DataDir    string
 	ConfigDir  string
 	CacheDir   string
 	Database   string
+	ShardDir   string
 	ConfigFile string
 	History    string
 }
@@ -37,6 +47,12 @@ type Config struct {
 	Metadata          string
 	Color             bool
 	UserAgent         string
+	// ShardCount is the number of entry-storage shards across which buckets are
+	// distributed so many scans can write concurrently (see
+	// docs/adr/0001-sharded-storage.md). Valid range is [1, 32]; the default is
+	// 16. It is fixed for a dataset once chosen; changing it needs an explicit
+	// re-shard migration, never an implicit remap.
+	ShardCount int
 	// GrayHatWarfareAPIKey authorizes the `ghw` public-bucket search. It can
 	// also come from the GRAYHATWARFARE_API_KEY environment variable, which
 	// takes precedence so a key never has to be written to disk.
@@ -67,6 +83,7 @@ func DefaultPaths() (Paths, error) {
 	return Paths{
 		DataDir: data, ConfigDir: configDir, CacheDir: cacheDir,
 		Database:   filepath.Join(data, "dirhop.db"),
+		ShardDir:   filepath.Join(data, "shards"),
 		ConfigFile: filepath.Join(configDir, "config.toml"),
 		History:    filepath.Join(data, "history"),
 	}, nil
@@ -106,7 +123,7 @@ func Default() (Config, error) {
 		HTTPTimeout: 30 * time.Second, BusyTimeout: 60 * time.Second,
 		PreflightTimeout: 8 * time.Second,
 		Retries:          3, DownloadDirectory: "downloads", Metadata: "normal",
-		Color: true, UserAgent: "dirhop/1",
+		Color: true, UserAgent: "dirhop/1", ShardCount: defaultShardCount,
 	}, nil
 }
 
@@ -150,6 +167,10 @@ func Load(path string) (Config, error) {
 		switch key {
 		case "database":
 			cfg.Paths.Database = expandHome(value)
+		case "shard_dir":
+			cfg.Paths.ShardDir = expandHome(value)
+		case "shard_count":
+			cfg.ShardCount, err = positiveInt(value)
 		case "history":
 			cfg.Paths.History = expandHome(value)
 		case "crawl_concurrency":
@@ -195,6 +216,15 @@ func Load(path string) (Config, error) {
 	if cfg.PreflightTimeout <= 0 {
 		cfg.PreflightTimeout = 8 * time.Second
 	}
+	if cfg.ShardCount == 0 {
+		cfg.ShardCount = defaultShardCount
+	}
+	if cfg.ShardCount < minShardCount || cfg.ShardCount > maxShardCount {
+		return Config{}, fmt.Errorf("shard_count must be between %d and %d", minShardCount, maxShardCount)
+	}
+	if cfg.Paths.ShardDir == "" {
+		cfg.Paths.ShardDir = filepath.Join(filepath.Dir(cfg.Paths.Database), "shards")
+	}
 	return cfg, nil
 }
 
@@ -211,7 +241,7 @@ func applyEnvOverrides(cfg *Config) {
 
 // EnsureDirs creates application-owned directories with user-only permissions.
 func (p Paths) EnsureDirs() error {
-	for _, dir := range []string{p.DataDir, p.ConfigDir, p.CacheDir, filepath.Dir(p.Database), filepath.Dir(p.History)} {
+	for _, dir := range []string{p.DataDir, p.ConfigDir, p.CacheDir, filepath.Dir(p.Database), p.ShardDir, filepath.Dir(p.History)} {
 		if dir == "" || dir == "." {
 			continue
 		}

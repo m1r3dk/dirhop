@@ -17,6 +17,7 @@ A URL maps to a stored session by its canonical URL, not its generated name. Can
 - `internal/config`: application-data paths and simple configuration loading.
 - `internal/model`: shared persistent and transport types.
 - `internal/database`: SQLite lifecycle, schema, transactions, and persistence queries.
+- `internal/shard`: pure routing of buckets to a fixed set of storage shards (see ADR 0001).
 - `internal/session`: session naming, lookup, activation, and lifecycle.
 - `internal/httpclient`: bounded, retrying HTTP transport with safe logging.
 - `internal/parser`: parser interface, detector, and format-specific/generic HTML parsers.
@@ -38,7 +39,16 @@ Each site has a synthetic root entry at normalized path `/`. Entries are unique 
 
 One database is stored in the OS user data directory. Connections enable WAL, foreign keys, a busy timeout, and normal synchronous mode. Reads use short implicit transactions. Crawls parse concurrently but send mutations through one batched writer transaction at a time. No process-wide lock is used, so read-only commands and downloads can run while another process crawls.
 
-Core tables are `sites`, `entries`, `crawl_runs`, `crawl_errors`, `downloads`, and `app_state`. Indexes cover site/parent, site/path, name, extension, type, size, and modified time.
+Core tables are `sites`, `entries`, `crawl_runs`, `crawl_errors`, `downloads`, `scan_checkpoints`, and `app_state`. Indexes cover site/parent, site/path, name, extension, type, size, and modified time. The schema is applied only when `user_version` does not match the current `schemaVersion`, so a startup against an already-initialized database never takes the write lock; a persistent lock during initialization is reported as "locked by another process" rather than a bare deadline.
+
+## Sharded storage (ADR 0001)
+
+To index up to ~100,000 buckets without serializing every scan on SQLite's single writer, storage is moving to a two-tier model (see `docs/adr/0001-sharded-storage.md`):
+
+- **Catalog** (`catalog.db`): the small, global data, `sites`, `app_state`, `crawl_runs`, `scan_checkpoints`, plus per-bucket aggregate rollups so global `stats` reads the catalog and never the entry tables.
+- **Entry shards** (`shards/shard-NN.db`): a fixed set of independent databases holding `entries`. Each bucket is routed to exactly one shard by `internal/shard`, so up to `shard_count` buckets index concurrently, each locking only its own shard.
+
+`shard_count` is configurable (`shard_count`, range 1-32, default 16) and is fixed for a dataset once chosen; a bucket's assigned shard is persisted so changing the count never silently remaps existing data. Global search fans out across the shards and merges; single-session reads open only that session's shard. The legacy single-file `dirhop.db` remains the active store until the migration (a later ADR) lands. `internal/shard` (the router and file naming) and the `shard_count` configuration are the first, already-landed pieces of this work.
 
 ## Parser contract
 
