@@ -71,7 +71,7 @@ func (s *ShardSet) ByIndex(index int) (*DB, error) {
 		return db, nil
 	}
 	path := filepath.Join(s.dir, shard.FileName(index))
-	db, err := OpenWithTimeout(path, s.busyTimeout)
+	db, err := OpenShard(path, s.busyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("open shard %d: %w", index, err)
 	}

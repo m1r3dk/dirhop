@@ -44,13 +44,16 @@ const (
 
 // Site is a persistent remote directory-listing session.
 type Site struct {
-	ID               int64
-	Name             string
-	OriginalURL      string
-	CanonicalURL     string
-	Hostname         string
-	ParserType       string
-	CWD              string
+	ID           int64
+	Name         string
+	OriginalURL  string
+	CanonicalURL string
+	Hostname     string
+	ParserType   string
+	CWD          string
+	// Shard is the entry-storage shard that owns this site's entries, assigned
+	// once at creation (see docs/adr/0001-sharded-storage.md).
+	Shard            int
 	EntryCount       int64
 	FileCount        int64
 	DirectoryCount   int64

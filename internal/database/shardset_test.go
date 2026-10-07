@@ -38,31 +38,26 @@ func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
 		t.Fatalf("shard dir %q escaped the test root %q", cfg.Paths.ShardDir, root)
 	}
 
-	set, err := OpenShardSet(cfg.Paths.ShardDir, cfg.ShardCount, cfg.BusyTimeout)
+	store, err := OpenStoreWithTimeout(cfg.Paths.Database, cfg.Paths.ShardDir, cfg.ShardCount, cfg.BusyTimeout)
 	if err != nil {
-		t.Fatalf("OpenShardSet from loaded config: %v", err)
+		t.Fatalf("OpenStoreWithTimeout from loaded config: %v", err)
 	}
-	defer set.Close()
-	if set.Count() != 8 {
-		t.Fatalf("shard count from config = %d, want 8", set.Count())
+	defer store.Close()
+	if store.shards.Count() != 8 {
+		t.Fatalf("shard count from config = %d, want 8", store.shards.Count())
 	}
 
 	ctx := context.Background()
-	const siteID = int64(123)
-	db, err := set.For(siteID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	site := &model.Site{Name: "bucket", OriginalURL: "https://b.s3.amazonaws.com/", CanonicalURL: "https://b.s3.amazonaws.com/", Hostname: "b.s3.amazonaws.com"}
-	if err := db.CreateSite(ctx, site); err != nil {
+	if err := store.CreateSite(ctx, site); err != nil {
 		t.Fatal(err)
 	}
-	root0, err := db.EntryByPath(ctx, site.ID, "/", false)
+	root0, err := store.EntryByPath(ctx, site.ID, "/", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sz := int64(7)
-	if _, err := db.UpsertEntries(ctx, []model.Entry{{
+	if _, err := store.UpsertEntries(ctx, []model.Entry{{
 		SiteID: site.ID, ParentID: &root0.ID, Name: "a.txt", NormalizedPath: "/a.txt",
 		URL: "https://b.s3.amazonaws.com/a.txt", Type: model.EntryTypeFile, Size: &sz, LastSeenAt: time.Now().UTC(),
 	}}); err != nil {
@@ -70,7 +65,7 @@ func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
 	}
 
 	// Read it back through the same shard the router resolves for this site.
-	got, err := set.For(siteID)
+	got, err := store.shards.ByIndex(site.Shard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +74,7 @@ func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
 	}
 
 	// The shard file exists on disk under the config-resolved shard directory.
-	want := filepath.Join(cfg.Paths.ShardDir, "shard-0"+itoa(set.ShardIndex(siteID))+".db")
+	want := filepath.Join(cfg.Paths.ShardDir, "shard-0"+itoa(site.Shard)+".db")
 	if _, err := os.Stat(want); err != nil {
 		// Fall back to a looser check: at least one shard-*.db exists.
 		matches, _ := filepath.Glob(filepath.Join(cfg.Paths.ShardDir, "shard-*.db"))
@@ -181,16 +176,20 @@ func TestShardSetWritesToDifferentShardsDoNotBlock(t *testing.T) {
 		t.Fatal("test ids unexpectedly share a shard")
 	}
 
-	// Seed a site row in each shard so entries have a valid parent.
-	seedSite := func(db *DB, id int64) *model.Site {
-		s := &model.Site{Name: "s", OriginalURL: "https://x.test/", CanonicalURL: "https://x.test/", Hostname: "x.test"}
-		if err := db.CreateSite(ctx, s); err != nil {
+	// Seed root entries in each shard. Shards hold entries only; catalog sites live
+	// in the store layer, outside this isolation test.
+	seedRoot := func(db *DB, id int64) model.Entry {
+		entries, err := db.UpsertEntriesNoRecount(ctx, []model.Entry{{
+			SiteID: id, Name: "", NormalizedPath: "/", URL: "https://x.test/",
+			Type: model.EntryTypeDirectory, LastSeenAt: time.Now().UTC(),
+		}})
+		if err != nil {
 			t.Fatal(err)
 		}
-		return s
+		return entries[0]
 	}
-	siteA := seedSite(shardA, a)
-	siteB := seedSite(shardB, b)
+	rootA := seedRoot(shardA, a)
+	rootB := seedRoot(shardB, b)
 
 	// Hold a write transaction open on shard A.
 	txA, err := shardA.SQL().BeginTx(ctx, nil)
@@ -198,21 +197,17 @@ func TestShardSetWritesToDifferentShardsDoNotBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer txA.Rollback()
-	if _, err := txA.ExecContext(ctx, `UPDATE app_state SET active_site_id=NULL WHERE singleton=1`); err != nil {
+	if _, err := txA.ExecContext(ctx, `UPDATE entries SET updated_at=updated_at WHERE site_id=?`, a); err != nil {
 		t.Fatal(err)
 	}
 
 	// Meanwhile, write to shard B. It must complete well within the shard busy
 	// timeout, proving it is not blocked by shard A's open writer.
-	rootB, err := shardB.EntryByPath(ctx, siteB.ID, "/", false)
-	if err != nil {
-		t.Fatal(err)
-	}
 	done := make(chan error, 1)
 	go func() {
 		sz := int64(1)
-		_, e := shardB.UpsertEntries(ctx, []model.Entry{{
-			SiteID: siteB.ID, ParentID: &rootB.ID, Name: "f.txt", NormalizedPath: "/f.txt",
+		_, e := shardB.UpsertEntriesNoRecount(ctx, []model.Entry{{
+			SiteID: b, ParentID: &rootB.ID, Name: "f.txt", NormalizedPath: "/f.txt",
 			URL: "https://x.test/f.txt", Type: model.EntryTypeFile, Size: &sz, LastSeenAt: time.Now().UTC(),
 		}})
 		done <- e
@@ -227,7 +222,7 @@ func TestShardSetWritesToDifferentShardsDoNotBlock(t *testing.T) {
 		t.Fatal("write to shard B blocked on shard A's open writer; shards are not isolated")
 	}
 
-	_ = siteA
+	_ = rootA
 	txA.Rollback()
 }
 

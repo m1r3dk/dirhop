@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,8 @@ import (
 
 var ErrNotFound = sql.ErrNoRows
 
+var errStopShardScan = errors.New("stop shard scan")
+
 // DB owns a SQLite connection pool. SQLite itself coordinates processes via WAL;
 // within this process, writeMu serializes write transactions so concurrent
 // crawls (for example a parallel multi-bucket scan) never contend for the single
@@ -29,6 +32,8 @@ type DB struct {
 	busyTimeout time.Duration
 	writeMu     sync.Mutex
 	path        string // on-disk path, for diagnostics; ":memory:" for in-memory
+	schema      string // the schema installed on open (catalog, shard, or combined)
+	shards      *ShardSet
 }
 
 // pathHint returns the database file path for user-facing error messages.
@@ -86,10 +91,45 @@ func maxDuration(a, b time.Duration) time.Duration {
 
 var memorySequence atomic.Uint64
 
-// Open opens or creates a database and installs the schema.
-func Open(path string) (*DB, error) { return OpenWithTimeout(path, 5*time.Second) }
+// Open opens or creates a database with the combined schema and installs it.
+// Used by per-file DB method tests; production code uses OpenCatalog/OpenShard
+// via the Store.
+func Open(path string) (*DB, error) { return openWithSchema(path, 5*time.Second, combinedSchema) }
 
+// OpenWithTimeout opens a combined-schema database with a custom busy timeout.
 func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
+	return openWithSchema(path, busyTimeout, combinedSchema)
+}
+
+// OpenStoreWithTimeout opens the production store: one catalog database plus a
+// lazily-opened fixed set of entry shards. It returns *DB to preserve the legacy
+// call surface while routing entry methods to the right shard internally.
+func OpenStoreWithTimeout(catalogPath, shardDir string, shardCount int, busyTimeout time.Duration) (*DB, error) {
+	catalog, err := OpenCatalog(catalogPath, busyTimeout)
+	if err != nil {
+		return nil, err
+	}
+	shards, err := OpenShardSet(shardDir, shardCount, busyTimeout)
+	if err != nil {
+		_ = catalog.Close()
+		return nil, err
+	}
+	catalog.shards = shards
+	return catalog, nil
+}
+
+// OpenCatalog opens the catalog database (sites, app_state, crawl_runs,
+// crawl_errors, scan_checkpoints).
+func OpenCatalog(path string, busyTimeout time.Duration) (*DB, error) {
+	return openWithSchema(path, busyTimeout, catalogSchema)
+}
+
+// OpenShard opens one entry-shard database (entries, downloads).
+func OpenShard(path string, busyTimeout time.Duration) (*DB, error) {
+	return openWithSchema(path, busyTimeout, shardSchema)
+}
+
+func openWithSchema(path string, busyTimeout time.Duration, schema string) (*DB, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is empty")
 	}
@@ -111,7 +151,7 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 	// rely on WAL + busy_timeout for cross-process writers to take turns.
 	sqldb.SetMaxOpenConns(1)
 	sqldb.SetMaxIdleConns(1)
-	db := &DB{sql: sqldb, busyTimeout: busyTimeout, path: path}
+	db := &DB{sql: sqldb, busyTimeout: busyTimeout, path: path, schema: schema}
 	ctx, cancel := context.WithTimeout(context.Background(), maxDuration(15*time.Second, busyTimeout+5*time.Second))
 	defer cancel()
 	if err := sqldb.PingContext(ctx); err != nil {
@@ -128,7 +168,7 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 // schemaVersion is bumped whenever the embedded schema changes shape. It lets a
 // startup skip the schema write entirely when the database is already current,
 // so the common case never contends for SQLite's single write lock.
-const schemaVersion = 1
+const schemaVersion = 3
 
 // ensureSchema installs the schema only when needed. It first reads
 // user_version (a lock-free read); if the database already matches, it returns
@@ -141,7 +181,10 @@ func (d *DB) ensureSchema(ctx context.Context) error {
 		return nil
 	}
 	err := d.withBusyRetry(ctx, func() error {
-		if _, err := d.sql.ExecContext(ctx, schema); err != nil {
+		if _, err := d.sql.ExecContext(ctx, d.schema); err != nil {
+			return err
+		}
+		if err := d.migrateSchema(ctx); err != nil {
 			return err
 		}
 		_, err := d.sql.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion))
@@ -157,6 +200,48 @@ func (d *DB) ensureSchema(ctx context.Context) error {
 	default:
 		return fmt.Errorf("initialize schema: %w", err)
 	}
+}
+
+func (d *DB) migrateSchema(ctx context.Context) error {
+	if ok, err := d.tableExists(ctx, "sites"); err != nil || !ok {
+		return err
+	}
+	if ok, err := d.columnExists(ctx, "sites", "shard"); err != nil || ok {
+		return err
+	}
+	_, err := d.sql.ExecContext(ctx, `ALTER TABLE sites ADD COLUMN shard INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+func (d *DB) tableExists(ctx context.Context, table string) (bool, error) {
+	var name string
+	err := d.sql.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (d *DB) columnExists(ctx context.Context, table, column string) (bool, error) {
+	rows, err := d.sql.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func sqliteDSN(path string, busy time.Duration) string {
@@ -175,8 +260,30 @@ func sqliteDSN(path string, busy time.Duration) string {
 	return u.String()
 }
 
-func (d *DB) Close() error { return d.sql.Close() }
+func (d *DB) Close() error {
+	var firstErr error
+	if d.shards != nil {
+		if err := d.shards.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if err := d.sql.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
 func (d *DB) SQL() *sql.DB { return d.sql }
+
+func (d *DB) entryDBForSite(ctx context.Context, siteID int64) (*DB, error) {
+	if d.shards == nil {
+		return d, nil
+	}
+	site, err := d.SiteByID(ctx, siteID)
+	if err != nil {
+		return nil, err
+	}
+	return d.shards.ByIndex(site.Shard)
+}
 
 func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	if site == nil {
@@ -194,6 +301,9 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	if site.CrawlConcurrency <= 0 {
 		site.CrawlConcurrency = 8
 	}
+	if d.shards != nil {
+		return d.createShardedSite(ctx, site)
+	}
 	now := time.Now().UTC()
 	if site.CreatedAt.IsZero() {
 		site.CreatedAt = now
@@ -209,7 +319,7 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	defer tx.Rollback()
 	site.EntryCount = max(site.EntryCount, 1)
 	site.DirectoryCount = max(site.DirectoryCount, 1)
-	res, err := tx.ExecContext(ctx, `INSERT INTO sites(name,original_url,canonical_url,hostname,parser_type,cwd,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, site.Name, site.OriginalURL, site.CanonicalURL, site.Hostname, site.ParserType, site.CWD, site.EntryCount, site.FileCount, site.DirectoryCount, site.TotalSize, site.ScanStatus, site.CrawlConcurrency, unix(site.CreatedAt), unix(site.UpdatedAt), nullableTime(site.LastCrawledAt))
+	res, err := tx.ExecContext(ctx, `INSERT INTO sites(name,original_url,canonical_url,hostname,parser_type,cwd,shard,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, site.Name, site.OriginalURL, site.CanonicalURL, site.Hostname, site.ParserType, site.CWD, site.Shard, site.EntryCount, site.FileCount, site.DirectoryCount, site.TotalSize, site.ScanStatus, site.CrawlConcurrency, unix(site.CreatedAt), unix(site.UpdatedAt), nullableTime(site.LastCrawledAt))
 	if err != nil {
 		return fmt.Errorf("insert site: %w", err)
 	}
@@ -217,15 +327,73 @@ func (d *DB) CreateSite(ctx context.Context, site *model.Site) error {
 	if err != nil {
 		return err
 	}
-	res, err = tx.ExecContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,removed,created_at,updated_at,last_seen_at) VALUES(?,NULL,'','/',?,'directory',0,?,?,?)`, site.ID, site.CanonicalURL, unix(now), unix(now), unix(now))
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO entries(site_id,parent_id,name,normalized_path,url,type,removed,created_at,updated_at,last_seen_at) VALUES(?,NULL,'','/',?,'directory',0,?,?,?)`, site.ID, site.CanonicalURL, unix(now), unix(now), unix(now)); err != nil {
 		return fmt.Errorf("insert root entry: %w", err)
 	}
-	_ = res
 	return tx.Commit()
 }
 
-const siteColumns = `id,name,original_url,canonical_url,hostname,parser_type,cwd,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at`
+func (d *DB) createShardedSite(ctx context.Context, site *model.Site) error {
+	now := time.Now().UTC()
+	if site.CreatedAt.IsZero() {
+		site.CreatedAt = now
+	}
+	if site.UpdatedAt.IsZero() {
+		site.UpdatedAt = now
+	}
+	site.EntryCount = max(site.EntryCount, 1)
+	site.DirectoryCount = max(site.DirectoryCount, 1)
+	defer d.lockWrite()()
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO sites(name,original_url,canonical_url,hostname,parser_type,cwd,shard,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, site.Name, site.OriginalURL, site.CanonicalURL, site.Hostname, site.ParserType, site.CWD, 0, site.EntryCount, site.FileCount, site.DirectoryCount, site.TotalSize, site.ScanStatus, site.CrawlConcurrency, unix(site.CreatedAt), unix(site.UpdatedAt), nullableTime(site.LastCrawledAt))
+	if err != nil {
+		return fmt.Errorf("insert site: %w", err)
+	}
+	site.ID, err = res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	site.Shard = d.shards.ShardIndex(site.ID)
+	if _, err = tx.ExecContext(ctx, `UPDATE sites SET shard=? WHERE id=?`, site.Shard, site.ID); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	shardDB, err := d.shards.ByIndex(site.Shard)
+	if err != nil {
+		_ = d.deleteSiteCatalogOnly(context.Background(), site.ID)
+		return err
+	}
+	if _, err = shardDB.UpsertEntriesNoRecount(ctx, []model.Entry{siteRootEntry(site)}); err != nil {
+		_ = d.deleteSiteCatalogOnly(context.Background(), site.ID)
+		return fmt.Errorf("insert root entry: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) deleteSiteCatalogOnly(ctx context.Context, id int64) error {
+	defer d.lockWrite()()
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM sites WHERE id=?`, id)
+	return err
+}
+
+// siteRootEntry returns the synthetic root directory entry for a freshly created
+// site. The Store inserts it into the site's shard (entries live in shards, not
+// the catalog, so it cannot be part of the CreateSite transaction).
+func siteRootEntry(site *model.Site) model.Entry {
+	now := time.Now().UTC()
+	return model.Entry{
+		SiteID: site.ID, Name: "", NormalizedPath: "/", URL: site.CanonicalURL,
+		Type: model.EntryTypeDirectory, CreatedAt: now, UpdatedAt: now, LastSeenAt: now,
+	}
+}
+
+const siteColumns = `id,name,original_url,canonical_url,hostname,parser_type,cwd,shard,entry_count,file_count,directory_count,total_size,scan_status,crawl_concurrency,created_at,updated_at,last_crawled_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -233,7 +401,7 @@ func scanSite(s scanner) (*model.Site, error) {
 	var x model.Site
 	var created, updated int64
 	var last sql.NullInt64
-	err := s.Scan(&x.ID, &x.Name, &x.OriginalURL, &x.CanonicalURL, &x.Hostname, &x.ParserType, &x.CWD, &x.EntryCount, &x.FileCount, &x.DirectoryCount, &x.TotalSize, &x.ScanStatus, &x.CrawlConcurrency, &created, &updated, &last)
+	err := s.Scan(&x.ID, &x.Name, &x.OriginalURL, &x.CanonicalURL, &x.Hostname, &x.ParserType, &x.CWD, &x.Shard, &x.EntryCount, &x.FileCount, &x.DirectoryCount, &x.TotalSize, &x.ScanStatus, &x.CrawlConcurrency, &created, &updated, &last)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +420,7 @@ func (d *DB) SiteByCanonicalURL(ctx context.Context, u string) (*model.Site, err
 	return scanSite(d.sql.QueryRowContext(ctx, `SELECT `+siteColumns+` FROM sites WHERE canonical_url=?`, u))
 }
 func (d *DB) ActiveSite(ctx context.Context) (*model.Site, error) {
-	return scanSite(d.sql.QueryRowContext(ctx, `SELECT s.id,s.name,s.original_url,s.canonical_url,s.hostname,s.parser_type,s.cwd,s.entry_count,s.file_count,s.directory_count,s.total_size,s.scan_status,s.crawl_concurrency,s.created_at,s.updated_at,s.last_crawled_at FROM sites s JOIN app_state a ON a.active_site_id=s.id WHERE a.singleton=1`))
+	return scanSite(d.sql.QueryRowContext(ctx, `SELECT `+siteColumns+` FROM sites s JOIN app_state a ON a.active_site_id=s.id WHERE a.singleton=1`))
 }
 
 func (d *DB) ListSites(ctx context.Context) ([]model.Site, error) {
@@ -336,6 +504,21 @@ func (d *DB) RenameSite(ctx context.Context, id int64, name string) error {
 	return affected(res, err)
 }
 func (d *DB) DeleteSite(ctx context.Context, id int64) error {
+	if d.shards != nil {
+		site, err := d.SiteByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		shardDB, err := d.shards.ByIndex(site.Shard)
+		if err != nil {
+			return err
+		}
+		defer shardDB.lockWrite()()
+		if _, err := shardDB.sql.ExecContext(ctx, `DELETE FROM entries WHERE site_id=?`, id); err != nil {
+			return err
+		}
+		return d.deleteSiteCatalogOnly(ctx, id)
+	}
 	defer d.lockWrite()()
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM sites WHERE id=?`, id)
 	return affected(res, err)
@@ -389,6 +572,13 @@ func scanEntry(s scanner) (*model.Entry, error) {
 	return &x, nil
 }
 func (d *DB) EntryByPath(ctx context.Context, siteID int64, path string, includeRemoved bool) (*model.Entry, error) {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return nil, err
+		}
+		return shardDB.EntryByPath(ctx, siteID, path, includeRemoved)
+	}
 	q := `SELECT ` + entryColumns + ` FROM entries WHERE site_id=? AND normalized_path=?`
 	if !includeRemoved {
 		q += ` AND removed=0`
@@ -396,9 +586,37 @@ func (d *DB) EntryByPath(ctx context.Context, siteID int64, path string, include
 	return scanEntry(d.sql.QueryRowContext(ctx, q, siteID, path))
 }
 func (d *DB) EntryByID(ctx context.Context, id int64) (*model.Entry, error) {
+	if d.shards != nil {
+		var found *model.Entry
+		err := d.shards.Each(func(_ int, shardDB *DB) error {
+			e, err := shardDB.EntryByID(ctx, id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found = e
+			return errStopShardScan
+		})
+		if errors.Is(err, errStopShardScan) {
+			return found, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, sql.ErrNoRows
+	}
 	return scanEntry(d.sql.QueryRowContext(ctx, `SELECT `+entryColumns+` FROM entries WHERE id=?`, id))
 }
 func (d *DB) Children(ctx context.Context, siteID, parentID int64) ([]model.Entry, error) {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return nil, err
+		}
+		return shardDB.Children(ctx, siteID, parentID)
+	}
 	rows, err := d.sql.QueryContext(ctx, `SELECT `+entryColumns+` FROM entries WHERE site_id=? AND parent_id=? AND removed=0 ORDER BY type='directory' DESC,name COLLATE NOCASE`, siteID, parentID)
 	if err != nil {
 		return nil, err
@@ -408,6 +626,13 @@ func (d *DB) Children(ctx context.Context, siteID, parentID int64) ([]model.Entr
 }
 
 func (d *DB) TouchDirectFiles(ctx context.Context, siteID, parentID int64, seen time.Time) error {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		return shardDB.TouchDirectFiles(ctx, siteID, parentID, seen)
+	}
 	defer d.lockWrite()()
 	_, err := d.sql.ExecContext(ctx, `UPDATE entries SET last_seen_at=?,updated_at=? WHERE site_id=? AND parent_id=? AND type='file' AND removed=0`, unix(seen), unix(time.Now()), siteID, parentID)
 	return err
@@ -427,6 +652,13 @@ func (d *DB) EntriesUnder(ctx context.Context, siteID int64, root string, includ
 // not seen in the most recent complete scan (soft-deleted). Newest removal
 // first. A limit <= 0 means no limit.
 func (d *DB) RemovedEntries(ctx context.Context, siteID int64, limit int) ([]model.Entry, error) {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return nil, err
+		}
+		return shardDB.RemovedEntries(ctx, siteID, limit)
+	}
 	q := `SELECT ` + entryColumns + ` FROM entries WHERE site_id=? AND removed=1 AND normalized_path<>'/' ORDER BY updated_at DESC, normalized_path COLLATE NOCASE`
 	args := []any{siteID}
 	if limit > 0 {
@@ -521,6 +753,13 @@ func subtreeWhere(siteID int64, root string, f EntryFilter) (string, []any) {
 
 // ScanEntries streams matching entries beneath root in path order.
 func (d *DB) ScanEntries(ctx context.Context, siteID int64, root string, f EntryFilter, fn func(model.Entry) error) error {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		return shardDB.ScanEntries(ctx, siteID, root, f, fn)
+	}
 	where, args := subtreeWhere(siteID, root, f)
 	rows, err := d.sql.QueryContext(ctx, `SELECT `+entryColumns+` FROM entries WHERE `+where+` ORDER BY normalized_path COLLATE NOCASE`, args...)
 	if err != nil {
@@ -541,6 +780,13 @@ func (d *DB) ScanEntries(ctx context.Context, siteID int64, root string, f Entry
 
 // DiskUsage aggregates a subtree inside SQLite.
 func (d *DB) DiskUsage(ctx context.Context, siteID int64, root string) (model.DiskUsage, error) {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return model.DiskUsage{}, err
+		}
+		return shardDB.DiskUsage(ctx, siteID, root)
+	}
 	where, args := subtreeWhere(siteID, root, EntryFilter{IncludeRoot: true})
 	var du model.DiskUsage
 	err := d.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(type='file'),0), COALESCE(SUM(type='directory'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE `+where, args...).Scan(&du.Files, &du.Directories, &du.Bytes)
@@ -549,6 +795,9 @@ func (d *DB) DiskUsage(ctx context.Context, siteID int64, root string) (model.Di
 
 // IndexStats summarizes the complete local index across all sessions.
 func (d *DB) IndexStats(ctx context.Context) (model.IndexStats, error) {
+	if d.shards != nil {
+		return d.indexStatsSharded(ctx)
+	}
 	var stats model.IndexStats
 	err := d.sql.QueryRowContext(ctx, `SELECT
 		COUNT(*),
@@ -600,6 +849,101 @@ func (d *DB) IndexStats(ctx context.Context) (model.IndexStats, error) {
 	return stats, extRows.Err()
 }
 
+func (d *DB) indexStatsSharded(ctx context.Context) (model.IndexStats, error) {
+	var stats model.IndexStats
+	err := d.sql.QueryRowContext(ctx, `SELECT
+		COUNT(*),
+		COALESCE(SUM(scan_status='complete'),0),
+		COALESCE(SUM(scan_status='failed'),0),
+		COALESCE(SUM(scan_status='running'),0),
+		COALESCE(SUM(scan_status='pending'),0),
+		COALESCE(SUM(scan_status='cancelled'),0),
+		COALESCE(SUM(file_count),0),
+		COALESCE(SUM(directory_count),0),
+		COALESCE(SUM(total_size),0)
+		FROM sites`).Scan(&stats.Sites, &stats.CompleteSites, &stats.FailedSites, &stats.RunningSites, &stats.PendingSites, &stats.CancelledSites, &stats.Files, &stats.Directories, &stats.Bytes)
+	if err != nil {
+		return stats, err
+	}
+	typeStats := map[model.EntryType]model.TypeStat{}
+	extStats := map[string]model.ExtensionStat{}
+	err = d.shards.Each(func(_ int, shardDB *DB) error {
+		var removedFiles, removedBytes int64
+		if err := shardDB.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(type='file'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE removed=1`).Scan(&removedFiles, &removedBytes); err != nil {
+			return err
+		}
+		stats.RemovedFiles += removedFiles
+		stats.RemovedBytes += removedBytes
+
+		typeRows, err := shardDB.sql.QueryContext(ctx, `SELECT type, COUNT(*), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE removed=0 AND normalized_path<>'/' GROUP BY type`)
+		if err != nil {
+			return err
+		}
+		for typeRows.Next() {
+			var row model.TypeStat
+			if err := typeRows.Scan(&row.Type, &row.Count, &row.Bytes); err != nil {
+				typeRows.Close()
+				return err
+			}
+			cur := typeStats[row.Type]
+			cur.Type = row.Type
+			cur.Count += row.Count
+			cur.Bytes += row.Bytes
+			typeStats[row.Type] = cur
+		}
+		if err := typeRows.Err(); err != nil {
+			typeRows.Close()
+			return err
+		}
+		typeRows.Close()
+
+		extRows, err := shardDB.sql.QueryContext(ctx, `SELECT CASE WHEN extension='' THEN '(none)' ELSE extension END AS ext, COUNT(*), COALESCE(SUM(size),0) FROM entries WHERE removed=0 AND type='file' GROUP BY ext`)
+		if err != nil {
+			return err
+		}
+		for extRows.Next() {
+			var row model.ExtensionStat
+			if err := extRows.Scan(&row.Extension, &row.Count, &row.Bytes); err != nil {
+				extRows.Close()
+				return err
+			}
+			cur := extStats[row.Extension]
+			cur.Extension = row.Extension
+			cur.Count += row.Count
+			cur.Bytes += row.Bytes
+			extStats[row.Extension] = cur
+		}
+		if err := extRows.Err(); err != nil {
+			extRows.Close()
+			return err
+		}
+		extRows.Close()
+		return nil
+	})
+	if err != nil {
+		return stats, err
+	}
+	for _, row := range typeStats {
+		stats.Types = append(stats.Types, row)
+	}
+	for _, row := range extStats {
+		stats.Extensions = append(stats.Extensions, row)
+	}
+	sort.Slice(stats.Types, func(i, j int) bool {
+		if stats.Types[i].Count == stats.Types[j].Count {
+			return stats.Types[i].Type < stats.Types[j].Type
+		}
+		return stats.Types[i].Count > stats.Types[j].Count
+	})
+	sort.Slice(stats.Extensions, func(i, j int) bool {
+		if stats.Extensions[i].Count == stats.Extensions[j].Count {
+			return strings.ToLower(stats.Extensions[i].Extension) < strings.ToLower(stats.Extensions[j].Extension)
+		}
+		return stats.Extensions[i].Count > stats.Extensions[j].Count
+	})
+	return stats, nil
+}
+
 func scanEntryRows(rows *sql.Rows) ([]model.Entry, error) {
 	var out []model.Entry
 	for rows.Next() {
@@ -629,6 +973,19 @@ func (d *DB) UpsertEntriesNoRecount(ctx context.Context, entries []model.Entry) 
 
 // Recount refreshes a site's aggregate counters.
 func (d *DB) Recount(ctx context.Context, siteID int64) error {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		entries, files, dirs, bytes, err := shardDB.entryCounts(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		defer d.lockWrite()()
+		res, err := d.sql.ExecContext(ctx, `UPDATE sites SET entry_count=?,file_count=?,directory_count=?,total_size=?,updated_at=? WHERE id=?`, entries, files, dirs, bytes, unix(time.Now()), siteID)
+		return affected(res, err)
+	}
 	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -644,6 +1001,28 @@ func (d *DB) Recount(ctx context.Context, siteID int64) error {
 func (d *DB) upsertEntries(ctx context.Context, entries []model.Entry, recount bool) ([]model.Entry, error) {
 	if len(entries) == 0 {
 		return []model.Entry{}, nil
+	}
+	if d.shards != nil {
+		siteID := entries[0].SiteID
+		for i, e := range entries {
+			if e.SiteID != siteID {
+				return nil, fmt.Errorf("entry %d site_id %d does not match batch site_id %d", i, e.SiteID, siteID)
+			}
+		}
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return nil, err
+		}
+		out, err := shardDB.upsertEntries(ctx, entries, false)
+		if err != nil {
+			return nil, err
+		}
+		if recount {
+			if err := d.Recount(ctx, siteID); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
 	}
 	defer d.lockWrite()()
 	out := make([]model.Entry, len(entries))
@@ -701,7 +1080,24 @@ func recountTx(ctx context.Context, tx *sql.Tx, siteID int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE sites SET entry_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0),file_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0 AND type='file'),directory_count=(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0 AND type='directory'),total_size=COALESCE((SELECT SUM(size) FROM entries WHERE site_id=? AND removed=0 AND type='file'),0),updated_at=? WHERE id=?`, siteID, siteID, siteID, siteID, unix(time.Now()), siteID)
 	return err
 }
+
+func (d *DB) entryCounts(ctx context.Context, siteID int64) (entries, files, directories, bytes int64, err error) {
+	err = d.sql.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(type='file'),0), COALESCE(SUM(type='directory'),0), COALESCE(SUM(CASE WHEN type='file' THEN size END),0) FROM entries WHERE site_id=? AND removed=0`, siteID).Scan(&entries, &files, &directories, &bytes)
+	return entries, files, directories, bytes, err
+}
+
 func (d *DB) MarkEntriesRemovedBefore(ctx context.Context, siteID int64, seen time.Time) error {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		defer shardDB.lockWrite()()
+		if _, err = shardDB.sql.ExecContext(ctx, `UPDATE entries SET removed=1,updated_at=? WHERE site_id=? AND normalized_path<>'/' AND last_seen_at<?`, unix(time.Now()), siteID, unix(seen)); err != nil {
+			return err
+		}
+		return d.Recount(ctx, siteID)
+	}
 	defer d.lockWrite()()
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -715,6 +1111,23 @@ func (d *DB) MarkEntriesRemovedBefore(ctx context.Context, siteID int64, seen ti
 		return err
 	}
 	return tx.Commit()
+}
+
+// DeleteEntriesSeenAt removes non-root rows written during a failed speculative
+// indexing pass. It is used when a generic directory-listing crawl falls back to
+// a bucket API crawl in the same run; those speculative rows share the original
+// run timestamp and must not survive the successful bucket crawl.
+func (d *DB) DeleteEntriesSeenAt(ctx context.Context, siteID int64, seen time.Time) error {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return err
+		}
+		return shardDB.DeleteEntriesSeenAt(ctx, siteID, seen)
+	}
+	defer d.lockWrite()()
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM entries WHERE site_id=? AND normalized_path<>'/' AND last_seen_at=?`, siteID, unix(seen))
+	return err
 }
 
 func (d *DB) StartCrawlRun(ctx context.Context, run *model.CrawlRun) error {
@@ -864,6 +1277,13 @@ func (d *DB) ClearScanCheckpoint(ctx context.Context, siteID int64) error {
 
 // ListDownloads returns recent download records for a site, newest first.
 func (d *DB) ListDownloads(ctx context.Context, siteID int64, limit int) ([]model.Download, error) {
+	if d.shards != nil {
+		shardDB, err := d.entryDBForSite(ctx, siteID)
+		if err != nil {
+			return nil, err
+		}
+		return shardDB.ListDownloads(ctx, siteID, limit)
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -890,6 +1310,16 @@ func (d *DB) ListDownloads(ctx context.Context, siteID int64, limit int) ([]mode
 }
 
 func (d *DB) UpsertDownload(ctx context.Context, x *model.Download) error {
+	if d.shards != nil {
+		if x == nil {
+			return errors.New("invalid download")
+		}
+		shardDB, err := d.entryDBForSite(ctx, x.SiteID)
+		if err != nil {
+			return err
+		}
+		return shardDB.UpsertDownload(ctx, x)
+	}
 	if x == nil || x.SiteID == 0 || x.EntryID == 0 || x.Destination == "" {
 		return errors.New("invalid download")
 	}
@@ -948,6 +1378,33 @@ func boolInt(v bool) int {
 // returns the number of rows deleted and refreshes affected site aggregates.
 // Space is not returned to the OS until Vacuum runs.
 func (d *DB) PurgeRemovedEntries(ctx context.Context, siteID int64) (int64, error) {
+	if d.shards != nil {
+		if siteID != 0 {
+			shardDB, err := d.entryDBForSite(ctx, siteID)
+			if err != nil {
+				return 0, err
+			}
+			defer shardDB.lockWrite()()
+			res, err := shardDB.sql.ExecContext(ctx, `DELETE FROM entries WHERE removed=1 AND normalized_path<>'/' AND site_id=?`, siteID)
+			if err != nil {
+				return 0, err
+			}
+			deleted, _ := res.RowsAffected()
+			return deleted, d.Recount(ctx, siteID)
+		}
+		var total int64
+		err := d.shards.Each(func(_ int, shardDB *DB) error {
+			defer shardDB.lockWrite()()
+			res, err := shardDB.sql.ExecContext(ctx, `DELETE FROM entries WHERE removed=1 AND normalized_path<>'/'`)
+			if err != nil {
+				return err
+			}
+			deleted, _ := res.RowsAffected()
+			total += deleted
+			return nil
+		})
+		return total, err
+	}
 	defer d.lockWrite()()
 	var deleted int64
 	err := d.withBusyRetry(ctx, func() error {
@@ -982,6 +1439,16 @@ func (d *DB) PurgeRemovedEntries(ctx context.Context, siteID int64) (int64, erro
 // truncates it, so a large -wal left by a crashed or long scan does not keep
 // slowing every open. It is a no-op for in-memory databases.
 func (d *DB) CheckpointWAL(ctx context.Context) error {
+	if d.shards != nil {
+		if err := d.checkpointOne(ctx); err != nil {
+			return err
+		}
+		return d.shards.Each(func(_ int, shardDB *DB) error { return shardDB.CheckpointWAL(ctx) })
+	}
+	return d.checkpointOne(ctx)
+}
+
+func (d *DB) checkpointOne(ctx context.Context) error {
 	if d.path == ":memory:" {
 		return nil
 	}
@@ -997,6 +1464,16 @@ func (d *DB) CheckpointWAL(ctx context.Context) error {
 // rewrites the whole file, so it is slow and needs free space roughly equal to
 // the database size; callers should run it explicitly, not on every startup.
 func (d *DB) Vacuum(ctx context.Context) error {
+	if d.shards != nil {
+		if err := d.vacuumOne(ctx); err != nil {
+			return err
+		}
+		return d.shards.Each(func(_ int, shardDB *DB) error { return shardDB.Vacuum(ctx) })
+	}
+	return d.vacuumOne(ctx)
+}
+
+func (d *DB) vacuumOne(ctx context.Context) error {
 	if d.path == ":memory:" {
 		return nil
 	}
@@ -1020,6 +1497,33 @@ type SiteEntryStat struct {
 // SiteEntryStats returns per-site entry accounting ordered by live entry count
 // descending, so the heaviest sessions surface first.
 func (d *DB) SiteEntryStats(ctx context.Context) ([]SiteEntryStat, error) {
+	if d.shards != nil {
+		sites, err := d.ListSites(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]SiteEntryStat, 0, len(sites))
+		for _, site := range sites {
+			shardDB, err := d.shards.ByIndex(site.Shard)
+			if err != nil {
+				return nil, err
+			}
+			var live, removed int64
+			if err := shardDB.sql.QueryRowContext(ctx, `SELECT
+				(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=0 AND normalized_path<>'/'),
+				(SELECT COUNT(*) FROM entries WHERE site_id=? AND removed=1 AND normalized_path<>'/')`, site.ID, site.ID).Scan(&live, &removed); err != nil {
+				return nil, err
+			}
+			out = append(out, SiteEntryStat{Site: site, LiveEntries: live, RemovedRows: removed})
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].LiveEntries == out[j].LiveEntries {
+				return strings.ToLower(out[i].Site.Name) < strings.ToLower(out[j].Site.Name)
+			}
+			return out[i].LiveEntries > out[j].LiveEntries
+		})
+		return out, nil
+	}
 	rows, err := d.sql.QueryContext(ctx, `SELECT `+siteColumns+`,
 		(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=0 AND e.normalized_path<>'/') AS live,
 		(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=1 AND e.normalized_path<>'/') AS removed_rows
@@ -1034,7 +1538,7 @@ func (d *DB) SiteEntryStats(ctx context.Context) ([]SiteEntryStat, error) {
 		var created, updated int64
 		var last sql.NullInt64
 		var live, removed int64
-		if err := rows.Scan(&x.ID, &x.Name, &x.OriginalURL, &x.CanonicalURL, &x.Hostname, &x.ParserType, &x.CWD, &x.EntryCount, &x.FileCount, &x.DirectoryCount, &x.TotalSize, &x.ScanStatus, &x.CrawlConcurrency, &created, &updated, &last, &live, &removed); err != nil {
+		if err := rows.Scan(&x.ID, &x.Name, &x.OriginalURL, &x.CanonicalURL, &x.Hostname, &x.ParserType, &x.CWD, &x.Shard, &x.EntryCount, &x.FileCount, &x.DirectoryCount, &x.TotalSize, &x.ScanStatus, &x.CrawlConcurrency, &created, &updated, &last, &live, &removed); err != nil {
 			return nil, err
 		}
 		x.CreatedAt, x.UpdatedAt = fromUnix(created), fromUnix(updated)

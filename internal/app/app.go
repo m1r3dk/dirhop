@@ -61,7 +61,7 @@ func Open(cfg config.Config) (*App, error) {
 	if err := cfg.Paths.EnsureDirs(); err != nil {
 		return nil, err
 	}
-	db, err := database.OpenWithTimeout(cfg.Paths.Database, cfg.BusyTimeout)
+	db, err := database.OpenStoreWithTimeout(cfg.Paths.Database, cfg.Paths.ShardDir, cfg.ShardCount, cfg.BusyTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +177,11 @@ func (a *App) Crawl(ctx context.Context, site *model.Site, full bool) error {
 		// costs one request and only on a path that was already failing.
 		if rootUnsupported {
 			if target, ok := bucket.Probe(ctx, a.HTTP, site.CanonicalURL, a.Config.UserAgent); ok {
+				if err := a.DB.DeleteEntriesSeenAt(context.WithoutCancel(ctx), site.ID, run.StartedAt); err != nil {
+					return a.finishRun(ctx, site, run, err, true, true)
+				}
+				run.Directories, run.Files, run.Bytes, run.ErrorCount = 0, 0, 0, 0
+				run.CurrentPath = "/"
 				bucketErr := a.crawlBucket(ctx, site, target, run)
 				return a.finishRun(ctx, site, run, bucketErr, bucketErr != nil, false)
 			}
