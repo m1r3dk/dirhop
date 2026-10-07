@@ -369,6 +369,7 @@ type task struct {
 // errStopRange ends the task early without error.
 func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent string, page func(objs []Object, dirs []string, last string, more bool) error) (pages int, err error) {
 	token := ""
+	fellBackToHTTP := false
 	// V1 servers have no continuation token and page on an opaque marker
 	// instead. Detected from the first response, then used for the rest of
 	// this task so a V1-only endpoint is paged fully rather than truncated.
@@ -406,6 +407,13 @@ func listRange(ctx context.Context, client Doer, t Target, tk task, userAgent st
 		}
 		resp, err := client.Do(req)
 		if err != nil {
+			if !fellBackToHTTP && t.Provider != Azure && t.Endpoint.Scheme == "https" && isTLSError(err) {
+				endpoint := *t.Endpoint
+				endpoint.Scheme = "http"
+				t.Endpoint = &endpoint
+				fellBackToHTTP = true
+				continue
+			}
 			return pages, err
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))

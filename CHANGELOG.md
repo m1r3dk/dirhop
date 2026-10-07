@@ -54,6 +54,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Azure Blob Storage and DigitalOcean Spaces bucket support.
 
 ### Changed
+- S3-compatible bucket scans retry over plain HTTP when HTTPS listing fails with
+  TLS/SSL/certificate errors, matching preflight fallback for dotted bucket names
+  and HTTP-only bucket endpoints.
 - SQLite now uses one connection per process and a longer default busy timeout
   so two `dirhop` instances writing the same database wait for each other
   instead of failing quickly with `SQLITE_BUSY`; scan entry writes also retry

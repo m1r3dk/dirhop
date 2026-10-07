@@ -81,6 +81,33 @@ func TestListPaginatesWithContinuationToken(t *testing.T) {
 	}
 }
 
+func TestListFallsBackToHTTPOnHTTPSFailure(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("list-type") != "2" || r.URL.Query().Get("max-keys") != "1000" {
+			t.Errorf("unexpected query after fallback: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>a.txt</Key><Size>12</Size></Contents></ListBucketResult>`)
+	}))
+	defer server.Close()
+
+	endpoint, _ := url.Parse(strings.Replace(server.URL, "http://", "https://", 1) + "/")
+	var keys []string
+	pages, err := List(context.Background(), server.Client(), Target{Provider: S3, Endpoint: endpoint}, "ua", func(objs []Object) error {
+		for _, obj := range objs {
+			keys = append(keys, fmt.Sprintf("%s:%d", obj.Key, obj.Size))
+		}
+		return nil
+	})
+	if err != nil || pages != 1 || strings.Join(keys, ",") != "a.txt:12" {
+		t.Fatalf("pages=%d keys=%v err=%v, want successful HTTP fallback listing", pages, keys, err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("HTTP fallback listing server saw %d requests, want 1", hits.Load())
+	}
+}
+
 func TestCheckAccessClassifies(t *testing.T) {
 	cases := []struct {
 		name     string
