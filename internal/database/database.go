@@ -28,6 +28,15 @@ type DB struct {
 	sql         *sql.DB
 	busyTimeout time.Duration
 	writeMu     sync.Mutex
+	path        string // on-disk path, for diagnostics; ":memory:" for in-memory
+}
+
+// pathHint returns the database file path for user-facing error messages.
+func (d *DB) pathHint() string {
+	if d.path == "" {
+		return "sqlite"
+	}
+	return d.path
 }
 
 // lockWrite serializes a write transaction. Use as: defer d.lockWrite()().
@@ -102,18 +111,52 @@ func OpenWithTimeout(path string, busyTimeout time.Duration) (*DB, error) {
 	// rely on WAL + busy_timeout for cross-process writers to take turns.
 	sqldb.SetMaxOpenConns(1)
 	sqldb.SetMaxIdleConns(1)
-	db := &DB{sql: sqldb, busyTimeout: busyTimeout}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	db := &DB{sql: sqldb, busyTimeout: busyTimeout, path: path}
+	ctx, cancel := context.WithTimeout(context.Background(), maxDuration(15*time.Second, busyTimeout+5*time.Second))
 	defer cancel()
 	if err := sqldb.PingContext(ctx); err != nil {
 		sqldb.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	if _, err := sqldb.ExecContext(ctx, schema); err != nil {
+	if err := db.ensureSchema(ctx); err != nil {
 		sqldb.Close()
-		return nil, fmt.Errorf("initialize schema: %w", err)
+		return nil, err
 	}
 	return db, nil
+}
+
+// schemaVersion is bumped whenever the embedded schema changes shape. It lets a
+// startup skip the schema write entirely when the database is already current,
+// so the common case never contends for SQLite's single write lock.
+const schemaVersion = 1
+
+// ensureSchema installs the schema only when needed. It first reads
+// user_version (a lock-free read); if the database already matches, it returns
+// immediately without taking the write lock. Otherwise it applies the schema,
+// retrying transient busy locks and mapping a persistent lock to a clear,
+// actionable error instead of a bare "context deadline exceeded".
+func (d *DB) ensureSchema(ctx context.Context) error {
+	var version int
+	if err := d.sql.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err == nil && version == schemaVersion {
+		return nil
+	}
+	err := d.withBusyRetry(ctx, func() error {
+		if _, err := d.sql.ExecContext(ctx, schema); err != nil {
+			return err
+		}
+		_, err := d.sql.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion))
+		return err
+	})
+	switch {
+	case err == nil:
+		return nil
+	case isSQLiteBusy(err) || errors.Is(err, context.DeadlineExceeded):
+		// The only thing that holds the write lock long enough to time out here
+		// is another process (or a stale WAL from a crashed one), so say so.
+		return fmt.Errorf("initialize schema: database %q is locked by another process (close other dirhop runs, or remove a stale %s-wal if none are running): %w", d.pathHint(), d.pathHint(), err)
+	default:
+		return fmt.Errorf("initialize schema: %w", err)
+	}
 }
 
 func sqliteDSN(path string, busy time.Duration) string {

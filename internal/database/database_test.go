@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,6 +214,91 @@ func TestEntryUpsertRetriesAfterBusy(t *testing.T) {
 	}
 	if _, err = db1.EntryByPath(ctx, site.ID, "/file.zip", false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An already-initialized database must reopen without taking the write lock, so
+// a second dirhop process can start while another holds a long write
+// transaction. This is the regression behind "initialize schema: context
+// deadline exceeded": startup used to run the schema (a write) every time.
+func TestReopenSkipsSchemaWriteWhenCurrent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+	db1, err := OpenWithTimeout(path, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db1.Close()
+
+	// Hold a write transaction open so the single SQLite writer is occupied.
+	tx, err := db1.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE app_state SET active_site_id=NULL WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening a second handle must succeed quickly: it only reads user_version
+	// and finds the schema already current, so it never waits for the writer.
+	start := time.Now()
+	db2, err := OpenWithTimeout(path, 2*time.Second)
+	if err != nil {
+		t.Fatalf("reopen of an initialized db blocked on the write lock: %v", err)
+	}
+	defer db2.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("reopen took %v; it should not have contended for the write lock", elapsed)
+	}
+}
+
+// A persistent write lock during schema init must surface a clear, actionable
+// message instead of a bare "context deadline exceeded". An exclusive lock on
+// the file is held so even the schema's write is blocked.
+func TestSchemaInitReportsLockClearly(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+
+	// Hold an exclusive lock on the file via a raw connection in rollback-journal
+	// mode, so any other writer (including schema init) is blocked outright.
+	holder, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(50)&_pragma=journal_mode(DELETE)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	holder.SetMaxOpenConns(1)
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+
+	// A victim that must initialize the schema cannot get the lock; after the
+	// bounded retry it must return the actionable message.
+	victim := &DB{busyTimeout: 20 * time.Millisecond, path: path}
+	victim.sql, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(20)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer victim.sql.Close()
+	victim.sql.SetMaxOpenConns(1)
+
+	shortCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	err = victim.ensureSchema(shortCtx)
+	if err == nil {
+		t.Fatal("ensureSchema succeeded despite an exclusive lock")
+	}
+	if !strings.Contains(err.Error(), "locked by another process") {
+		t.Fatalf("schema-init lock error = %q, want an actionable 'locked by another process' message", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q should name the database path %q", err, path)
 	}
 }
 
