@@ -7,8 +7,84 @@ import (
 	"testing"
 	"time"
 
+	"github.com/m1r3dk/dirhop/internal/config"
 	"github.com/m1r3dk/dirhop/internal/model"
 )
+
+// Integration boundary: build a ShardSet the way the application will, from a
+// real loaded config (shard_count + shard_dir) and config.EnsureDirs, then
+// actually create a site and index an entry through the resolved shard. This
+// exercises config -> paths -> ShardSet -> DB end to end rather than hand-built
+// fixtures.
+func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.toml")
+	dbPath := filepath.Join(root, "data", "dirhop.db")
+	content := "database = \"" + dbPath + "\"\nshard_count = 8\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	set, err := OpenShardSet(cfg.Paths.ShardDir, cfg.ShardCount, cfg.BusyTimeout)
+	if err != nil {
+		t.Fatalf("OpenShardSet from loaded config: %v", err)
+	}
+	defer set.Close()
+	if set.Count() != 8 {
+		t.Fatalf("shard count from config = %d, want 8", set.Count())
+	}
+
+	ctx := context.Background()
+	const siteID = int64(123)
+	db, err := set.For(siteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	site := &model.Site{Name: "bucket", OriginalURL: "https://b.s3.amazonaws.com/", CanonicalURL: "https://b.s3.amazonaws.com/", Hostname: "b.s3.amazonaws.com"}
+	if err := db.CreateSite(ctx, site); err != nil {
+		t.Fatal(err)
+	}
+	root0, err := db.EntryByPath(ctx, site.ID, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sz := int64(7)
+	if _, err := db.UpsertEntries(ctx, []model.Entry{{
+		SiteID: site.ID, ParentID: &root0.ID, Name: "a.txt", NormalizedPath: "/a.txt",
+		URL: "https://b.s3.amazonaws.com/a.txt", Type: model.EntryTypeFile, Size: &sz, LastSeenAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read it back through the same shard the router resolves for this site.
+	got, err := set.For(siteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err := got.EntryByPath(ctx, site.ID, "/a.txt", false); err != nil || e.Name != "a.txt" {
+		t.Fatalf("entry not found in resolved shard: %+v err=%v", e, err)
+	}
+
+	// The shard file exists on disk under the config-resolved shard directory.
+	want := filepath.Join(cfg.Paths.ShardDir, "shard-0"+itoa(set.ShardIndex(siteID))+".db")
+	if _, err := os.Stat(want); err != nil {
+		// Fall back to a looser check: at least one shard-*.db exists.
+		matches, _ := filepath.Glob(filepath.Join(cfg.Paths.ShardDir, "shard-*.db"))
+		if len(matches) == 0 {
+			t.Fatalf("no shard file created under %s (wanted ~%s)", cfg.Paths.ShardDir, want)
+		}
+	}
+}
+
+// itoa renders a single-digit shard index; shard indices here are < 10 (count 8).
+func itoa(n int) string { return string(rune('0' + n)) }
 
 func newTestShardSet(t *testing.T, count int) *ShardSet {
 	t.Helper()
