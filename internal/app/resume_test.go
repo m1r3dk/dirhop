@@ -112,4 +112,32 @@ func TestBucketScanResumesAfterInterruption(t *testing.T) {
 	if _, _, ok, err := a.DB.ScanCheckpoint(ctx, site.ID); err != nil || ok {
 		t.Fatalf("checkpoint not cleared after completion: ok=%v err=%v", ok, err)
 	}
+
+	// Reconciliation safety: finishing the resumed run runs the removal pass
+	// (MarkEntriesRemovedBefore uses the run's StartedAt). Because the resumed
+	// run inherited the original scan start, a.txt (last-seen at that start) must
+	// survive rather than be reaped as stale. This is the real completion path a
+	// `Crawl` call takes, so it proves the end-to-end outcome, not just internals.
+	if err := a.finishRun(ctx, site, resumeRun, nil, false, false); err != nil {
+		t.Fatalf("finishRun after resume: %v", err)
+	}
+	for _, p := range []string{"/a.txt", "/b.txt"} {
+		e, err := a.DB.EntryByPath(ctx, site.ID, p, false)
+		if err != nil {
+			t.Fatalf("%s was reaped by reconciliation after a resumed scan: %v", p, err)
+		}
+		if e.Removed {
+			t.Fatalf("%s marked removed after a resumed scan", p)
+		}
+	}
+	site, err = a.DB.SiteByID(ctx, site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if site.ScanStatus != model.ScanStatusComplete {
+		t.Fatalf("site status=%q after resumed completion, want complete", site.ScanStatus)
+	}
+	if site.FileCount != 2 {
+		t.Fatalf("file_count=%d after resumed scan, want 2 (both keys retained)", site.FileCount)
+	}
 }
