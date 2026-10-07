@@ -264,4 +264,71 @@ func (m *Manager) Remove(ctx context.Context, selector string) error {
 	}
 	return m.db.DeleteSite(ctx, s.ID)
 }
+
+// bucketIdentity returns a stable key for the underlying object-storage target a
+// site indexes, so two sessions that point at the same bucket+prefix through
+// different URL spellings (virtual-hosted vs path-style, cdn alias, etc.) map to
+// the same key. Non-bucket sites fall back to their canonical URL, which is
+// already UNIQUE, so they never falsely group.
+func bucketIdentity(canonicalURL string) string {
+	if target, ok := bucket.Detect(canonicalURL); ok {
+		return fmt.Sprintf("%s|%s|%s", target.Provider, strings.ToLower(target.Bucket), target.Prefix)
+	}
+	return "url|" + canonicalURL
+}
+
+// DuplicateGroup is a set of sessions that index the same underlying bucket
+// target. Keep is the session to retain (the one with the most live entries,
+// ties broken by lowest ID); Duplicates are the redundant copies that can be
+// removed to reclaim space.
+type DuplicateGroup struct {
+	Identity   string
+	Keep       model.Site
+	Duplicates []model.Site
+}
+
+// Duplicates groups sessions by their underlying bucket identity and returns
+// only the groups that have more than one session. For each group the session
+// with the most live indexed entries is kept and the rest are reported as
+// removable duplicates.
+func (m *Manager) Duplicates(ctx context.Context) ([]DuplicateGroup, error) {
+	stats, err := m.db.SiteEntryStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	liveByID := make(map[int64]int64, len(stats))
+	groups := map[string][]model.Site{}
+	order := []string{}
+	for _, s := range stats {
+		liveByID[s.Site.ID] = s.LiveEntries
+		id := bucketIdentity(s.Site.CanonicalURL)
+		if _, seen := groups[id]; !seen {
+			order = append(order, id)
+		}
+		groups[id] = append(groups[id], s.Site)
+	}
+	var out []DuplicateGroup
+	for _, id := range order {
+		sites := groups[id]
+		if len(sites) < 2 {
+			continue
+		}
+		// Keep the richest index; ties go to the lowest (oldest) ID for stability.
+		keepIdx := 0
+		for i := 1; i < len(sites); i++ {
+			a, b := sites[i], sites[keepIdx]
+			if liveByID[a.ID] > liveByID[b.ID] || (liveByID[a.ID] == liveByID[b.ID] && a.ID < b.ID) {
+				keepIdx = i
+			}
+		}
+		g := DuplicateGroup{Identity: id, Keep: sites[keepIdx]}
+		for i, s := range sites {
+			if i != keepIdx {
+				g.Duplicates = append(g.Duplicates, s)
+			}
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
 func (m *Manager) ClearActive(ctx context.Context) error { return m.db.ClearActiveSite(ctx) }

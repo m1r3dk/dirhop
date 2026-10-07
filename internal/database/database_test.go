@@ -302,6 +302,80 @@ func TestSchemaInitReportsLockClearly(t *testing.T) {
 	}
 }
 
+// PurgeRemovedEntries hard-deletes soft-removed rows and refreshes aggregates;
+// Vacuum then reclaims the freed pages. This is the cleanup path for a DB that
+// has grown with stale rows across rescans.
+func TestPurgeRemovedEntriesAndVacuum(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := &model.Site{Name: "ex", OriginalURL: "https://ex.test/", CanonicalURL: "https://ex.test/", Hostname: "ex.test"}
+	if err := db.CreateSite(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	root, err := db.EntryByPath(ctx, s.ID, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Now().UTC()
+	for _, name := range []string{"keep.txt", "gone1.txt", "gone2.txt"} {
+		sz := int64(1)
+		if _, err := db.UpsertEntries(ctx, []model.Entry{{SiteID: s.ID, ParentID: &root.ID, Name: name, NormalizedPath: "/" + name, URL: "https://ex.test/" + name, Type: model.EntryTypeFile, Size: &sz, LastSeenAt: seen}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Soft-remove two of the three by reconciling against a later scan start.
+	if _, err := db.sql.ExecContext(ctx, `UPDATE entries SET removed=1 WHERE normalized_path IN ('/gone1.txt','/gone2.txt')`); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := db.SiteEntryStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 1 || stats[0].RemovedRows != 2 || stats[0].LiveEntries != 1 {
+		t.Fatalf("stats before purge = %+v, want 1 live / 2 removed", stats)
+	}
+
+	deleted, err := db.PurgeRemovedEntries(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2 {
+		t.Fatalf("purged %d rows, want 2", deleted)
+	}
+	// The kept entry survives; the removed ones are gone even including removed.
+	if _, err := db.EntryByPath(ctx, s.ID, "/keep.txt", false); err != nil {
+		t.Fatalf("purge deleted a live entry: %v", err)
+	}
+	if _, err := db.EntryByPath(ctx, s.ID, "/gone1.txt", true); err == nil {
+		t.Fatal("purge left a soft-removed row behind")
+	}
+	after, err := db.SiteEntryStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[0].RemovedRows != 0 || after[0].LiveEntries != 1 {
+		t.Fatalf("stats after purge = %+v, want 1 live / 0 removed", after)
+	}
+
+	// Checkpoint + vacuum must succeed and leave the DB usable.
+	if err := db.CheckpointWAL(ctx); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := db.Vacuum(ctx); err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+	if _, err := db.EntryByPath(ctx, s.ID, "/keep.txt", false); err != nil {
+		t.Fatalf("db unusable after vacuum: %v", err)
+	}
+}
+
 func TestMemoryDatabasesAreIsolated(t *testing.T) {
 	a, err := Open(":memory:")
 	if err != nil {

@@ -942,3 +942,104 @@ func boolInt(v bool) int {
 	}
 	return 0
 }
+
+// PurgeRemovedEntries hard-deletes soft-removed (removed=1) rows that crawls
+// accumulate but never reclaim. Passing siteID=0 purges across all sites. It
+// returns the number of rows deleted and refreshes affected site aggregates.
+// Space is not returned to the OS until Vacuum runs.
+func (d *DB) PurgeRemovedEntries(ctx context.Context, siteID int64) (int64, error) {
+	defer d.lockWrite()()
+	var deleted int64
+	err := d.withBusyRetry(ctx, func() error {
+		tx, err := d.sql.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var res sql.Result
+		if siteID == 0 {
+			res, err = tx.ExecContext(ctx, `DELETE FROM entries WHERE removed=1 AND normalized_path<>'/'`)
+		} else {
+			res, err = tx.ExecContext(ctx, `DELETE FROM entries WHERE removed=1 AND normalized_path<>'/' AND site_id=?`, siteID)
+		}
+		if err != nil {
+			return err
+		}
+		deleted, _ = res.RowsAffected()
+		if siteID == 0 {
+			if _, err = tx.ExecContext(ctx, `UPDATE sites SET entry_count=(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=0),file_count=(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=0 AND e.type='file'),directory_count=(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=0 AND e.type='directory'),total_size=COALESCE((SELECT SUM(size) FROM entries e WHERE e.site_id=sites.id AND e.removed=0 AND e.type='file'),0),updated_at=?`, unix(time.Now())); err != nil {
+				return err
+			}
+		} else if err = recountTx(ctx, tx, siteID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	return deleted, err
+}
+
+// CheckpointWAL folds the write-ahead log back into the main database file and
+// truncates it, so a large -wal left by a crashed or long scan does not keep
+// slowing every open. It is a no-op for in-memory databases.
+func (d *DB) CheckpointWAL(ctx context.Context) error {
+	if d.path == ":memory:" {
+		return nil
+	}
+	defer d.lockWrite()()
+	return d.withBusyRetry(ctx, func() error {
+		_, err := d.sql.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+		return err
+	})
+}
+
+// Vacuum rewrites the database to reclaim pages freed by deletes (for example
+// after PurgeRemovedEntries or DeleteSite), shrinking the file on disk. It
+// rewrites the whole file, so it is slow and needs free space roughly equal to
+// the database size; callers should run it explicitly, not on every startup.
+func (d *DB) Vacuum(ctx context.Context) error {
+	if d.path == ":memory:" {
+		return nil
+	}
+	defer d.lockWrite()()
+	// VACUUM cannot run inside a transaction and holds the write lock for its
+	// duration; withBusyRetry handles a transiently busy writer.
+	return d.withBusyRetry(ctx, func() error {
+		_, err := d.sql.ExecContext(ctx, `VACUUM`)
+		return err
+	})
+}
+
+// SiteEntryStat summarizes one site's live and soft-removed entry counts, used
+// by cleanup tooling to show where space is going and to spot duplicates.
+type SiteEntryStat struct {
+	Site        model.Site
+	LiveEntries int64
+	RemovedRows int64
+}
+
+// SiteEntryStats returns per-site entry accounting ordered by live entry count
+// descending, so the heaviest sessions surface first.
+func (d *DB) SiteEntryStats(ctx context.Context) ([]SiteEntryStat, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+siteColumns+`,
+		(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=0 AND e.normalized_path<>'/') AS live,
+		(SELECT COUNT(*) FROM entries e WHERE e.site_id=sites.id AND e.removed=1 AND e.normalized_path<>'/') AS removed_rows
+		FROM sites ORDER BY live DESC, name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SiteEntryStat
+	for rows.Next() {
+		var x model.Site
+		var created, updated int64
+		var last sql.NullInt64
+		var live, removed int64
+		if err := rows.Scan(&x.ID, &x.Name, &x.OriginalURL, &x.CanonicalURL, &x.Hostname, &x.ParserType, &x.CWD, &x.EntryCount, &x.FileCount, &x.DirectoryCount, &x.TotalSize, &x.ScanStatus, &x.CrawlConcurrency, &created, &updated, &last, &live, &removed); err != nil {
+			return nil, err
+		}
+		x.CreatedAt, x.UpdatedAt = fromUnix(created), fromUnix(updated)
+		x.LastCrawledAt = fromNullTime(last)
+		out = append(out, SiteEntryStat{Site: x, LiveEntries: live, RemovedRows: removed})
+	}
+	return out, rows.Err()
+}

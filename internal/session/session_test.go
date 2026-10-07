@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/m1r3dk/dirhop/internal/database"
+	"github.com/m1r3dk/dirhop/internal/model"
 )
 
 func TestCanonicalURL(t *testing.T) {
@@ -100,6 +101,60 @@ func TestBucketSessionsNamedByBucket(t *testing.T) {
 	}
 	if s.Name != "mirror-example-com-pub" {
 		t.Fatalf("non-bucket name=%q", s.Name)
+	}
+}
+
+// Two sessions that point at the same S3 bucket through different URL spellings
+// (virtual-hosted vs path-style) must be detected as duplicates, keeping the one
+// with the richer index.
+func TestDuplicatesDetectsSameBucketDifferentURLs(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := New(db)
+
+	// Same bucket "wustl" in us-east-1, two addressing styles.
+	vhost, _, err := m.Open(ctx, "https://wustl.s3.amazonaws.com/", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathStyle, _, err := m.Open(ctx, "https://s3.amazonaws.com/wustl/", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A genuinely different bucket must not be grouped with them.
+	if _, _, err := m.Open(ctx, "https://other.s3.amazonaws.com/", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give the virtual-hosted session more live entries so it is the one kept.
+	root, err := db.EntryByPath(ctx, vhost.ID, "/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := vhost.CreatedAt
+	for _, p := range []string{"/a", "/b", "/c"} {
+		if _, err := db.UpsertEntries(ctx, []model.Entry{{SiteID: vhost.ID, ParentID: &root.ID, Name: p[1:], NormalizedPath: p, URL: "https://wustl.s3.amazonaws.com" + p, Type: model.EntryTypeFile, LastSeenAt: seen}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	groups, err := m.Duplicates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("found %d duplicate groups, want 1: %+v", len(groups), groups)
+	}
+	g := groups[0]
+	if g.Keep.ID != vhost.ID {
+		t.Fatalf("kept session %d, want the richer index %d", g.Keep.ID, vhost.ID)
+	}
+	if len(g.Duplicates) != 1 || g.Duplicates[0].ID != pathStyle.ID {
+		t.Fatalf("duplicates=%+v, want just the path-style session %d", g.Duplicates, pathStyle.ID)
 	}
 }
 
