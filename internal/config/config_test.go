@@ -115,6 +115,40 @@ func TestShardCountConfig(t *testing.T) {
 	}
 }
 
+// When `database` is overridden but `shard_dir` is not, the shard directory must
+// follow the database directory, not fall back to the global default location.
+// Regression: a custom database path used to silently keep the default shards
+// directory, so tests and alternate installs wrote into the shared location.
+func TestShardDirFollowsDatabaseOverride(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sub", "custom.db")
+	file := filepath.Join(dir, "config")
+	if err := os.WriteFile(file, []byte("database = \""+dbPath+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Dir(dbPath), "shards")
+	if cfg.Paths.ShardDir != want {
+		t.Fatalf("shard dir = %q, want %q (beside the overridden database)", cfg.Paths.ShardDir, want)
+	}
+
+	// An explicit shard_dir still wins.
+	file2 := filepath.Join(dir, "config2")
+	if err := os.WriteFile(file2, []byte("database = \""+dbPath+"\"\nshard_dir = \"/tmp/explicit\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(file2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Paths.ShardDir != "/tmp/explicit" {
+		t.Fatalf("explicit shard_dir not honored: %q", cfg2.Paths.ShardDir)
+	}
+}
+
 // EnsureDirs must create the shard directory too.
 func TestEnsureDirsCreatesShardDir(t *testing.T) {
 	root := t.TempDir()

@@ -146,6 +146,11 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+	// Track whether the file explicitly set shard_dir. When it does not, the
+	// shard directory follows the (possibly overridden) database directory, so a
+	// custom `database` path keeps its shards beside it instead of silently using
+	// the global default location.
+	shardDirExplicit := false
 	for n, raw := range strings.Split(string(b), "\n") {
 		line := strings.TrimSpace(stripComment(raw))
 		if line == "" {
@@ -169,6 +174,7 @@ func Load(path string) (Config, error) {
 			cfg.Paths.Database = expandHome(value)
 		case "shard_dir":
 			cfg.Paths.ShardDir = expandHome(value)
+			shardDirExplicit = true
 		case "shard_count":
 			cfg.ShardCount, err = positiveInt(value)
 		case "history":
@@ -222,7 +228,7 @@ func Load(path string) (Config, error) {
 	if cfg.ShardCount < minShardCount || cfg.ShardCount > maxShardCount {
 		return Config{}, fmt.Errorf("shard_count must be between %d and %d", minShardCount, maxShardCount)
 	}
-	if cfg.Paths.ShardDir == "" {
+	if cfg.Paths.ShardDir == "" || !shardDirExplicit {
 		cfg.Paths.ShardDir = filepath.Join(filepath.Dir(cfg.Paths.Database), "shards")
 	}
 	return cfg, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,11 @@ func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
 	}
 	if err := cfg.Paths.EnsureDirs(); err != nil {
 		t.Fatal(err)
+	}
+	// Safety: the shard directory must live under the overridden database path's
+	// directory (the temp root), never the global default location.
+	if !filepathHasPrefix(cfg.Paths.ShardDir, root) {
+		t.Fatalf("shard dir %q escaped the test root %q", cfg.Paths.ShardDir, root)
 	}
 
 	set, err := OpenShardSet(cfg.Paths.ShardDir, cfg.ShardCount, cfg.BusyTimeout)
@@ -85,6 +91,15 @@ func TestShardSetFromLoadedConfigIndexesEntry(t *testing.T) {
 
 // itoa renders a single-digit shard index; shard indices here are < 10 (count 8).
 func itoa(n int) string { return string(rune('0' + n)) }
+
+// filepathHasPrefix reports whether path is within dir.
+func filepathHasPrefix(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
 
 func newTestShardSet(t *testing.T, count int) *ShardSet {
 	t.Helper()
