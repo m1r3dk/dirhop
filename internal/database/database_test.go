@@ -253,6 +253,75 @@ func TestReopenSkipsSchemaWriteWhenCurrent(t *testing.T) {
 	}
 }
 
+// Upgrading a pre-shard database (no sites.shard column, user_version=0) must
+// succeed. The regression: ensureSchema ran the schema - which creates an index
+// on sites(shard) - before the migration that adds the column, so every
+// existing user's first run on a sharded build failed with
+// "no such column: shard". Migrations must run before the schema's indexes.
+func TestOpenUpgradesPreShardDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "dirhop.db")
+
+	// Build an old-style database: a sites table without the shard column, plus
+	// a row, and user_version left at 0 so ensureSchema treats it as outdated.
+	seed, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSites := `CREATE TABLE sites (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+		original_url TEXT NOT NULL,
+		canonical_url TEXT NOT NULL UNIQUE,
+		hostname TEXT NOT NULL,
+		parser_type TEXT NOT NULL DEFAULT '',
+		cwd TEXT NOT NULL DEFAULT '/',
+		entry_count INTEGER NOT NULL DEFAULT 0,
+		file_count INTEGER NOT NULL DEFAULT 0,
+		directory_count INTEGER NOT NULL DEFAULT 1,
+		total_size INTEGER NOT NULL DEFAULT 0,
+		scan_status TEXT NOT NULL DEFAULT 'pending',
+		crawl_concurrency INTEGER NOT NULL DEFAULT 8 CHECK(crawl_concurrency > 0),
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		last_crawled_at INTEGER
+	);`
+	if _, err := seed.ExecContext(ctx, oldSites); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.ExecContext(ctx,
+		`INSERT INTO sites (name, original_url, canonical_url, hostname, created_at, updated_at)
+		 VALUES ('legacy', 'https://legacy.example/', 'https://legacy.example/', 'legacy.example', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening on a sharded build must migrate in place, not fail.
+	db, err := OpenWithTimeout(path, 2*time.Second)
+	if err != nil {
+		t.Fatalf("opening a pre-shard database must upgrade cleanly: %v", err)
+	}
+	defer db.Close()
+
+	if ok, err := db.columnExists(ctx, "sites", "shard"); err != nil || !ok {
+		t.Fatalf("shard column not added by migration (ok=%v, err=%v)", ok, err)
+	}
+	// The existing row must survive with the default shard, and new writes work.
+	var shard int
+	if err := db.SQL().QueryRowContext(ctx, `SELECT shard FROM sites WHERE name='legacy'`).Scan(&shard); err != nil {
+		t.Fatalf("legacy row lost after migration: %v", err)
+	}
+	if shard != 0 {
+		t.Errorf("migrated row shard = %d, want default 0", shard)
+	}
+	s := &model.Site{Name: "fresh", OriginalURL: "https://fresh.example/", CanonicalURL: "https://fresh.example/", Hostname: "fresh.example"}
+	if err := db.CreateSite(ctx, s); err != nil {
+		t.Fatalf("CreateSite after migration failed: %v", err)
+	}
+}
+
 // A persistent write lock during schema init must surface a clear, actionable
 // message instead of a bare "context deadline exceeded". An exclusive lock on
 // the file is held so even the schema's write is blocked.

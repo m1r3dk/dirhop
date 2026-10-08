@@ -181,10 +181,16 @@ func (d *DB) ensureSchema(ctx context.Context) error {
 		return nil
 	}
 	err := d.withBusyRetry(ctx, func() error {
-		if _, err := d.sql.ExecContext(ctx, d.schema); err != nil {
+		// Migrations run first: the schema below creates indexes on columns
+		// (e.g. sites.shard) that an older database does not have yet. On a
+		// pre-existing database, CREATE TABLE IF NOT EXISTS is a no-op, so the
+		// new column must be added by migrateSchema before the index referencing
+		// it is created. On a brand-new database migrateSchema is a no-op because
+		// the table does not exist yet, and the schema creates everything.
+		if err := d.migrateSchema(ctx); err != nil {
 			return err
 		}
-		if err := d.migrateSchema(ctx); err != nil {
+		if _, err := d.sql.ExecContext(ctx, d.schema); err != nil {
 			return err
 		}
 		_, err := d.sql.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion))
