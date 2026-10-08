@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `version` command plus `--version/-V` report the build version, commit, date,
+  Go version, and platform (`version --json` for structured output). Release
+  binaries embed these via ldflags; `go install` builds fall back to Go build
+  info. The command runs without opening the database.
 - `find --all-sites` and `search --all-sites` search every indexed session at
   once and print `session:path` matches. `download --all-sites --ext zip` and
   `download --all-sites --include '*secrets*'` download matching files from all
@@ -74,6 +78,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (parallel multi-bucket scans) never surface `SQLITE_BUSY`; reads stay
   concurrent under WAL.
 - Bumped `golang.org/x/net` to v0.55.0 to clear known advisories.
+
+### Fixed
+- Upgrading a database created before sharded storage no longer fails with
+  `initialize schema: no such column: shard`. Schema migrations now run before
+  the schema's indexes, so the `sites.shard` column is added before the index
+  that references it. Existing indexes and rows are preserved.
 
 ### Security
 - `govulncheck` reports no vulnerabilities in called code.

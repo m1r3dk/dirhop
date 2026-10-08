@@ -8,7 +8,7 @@ one.
 ## Global flags
 
 `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`,
-`--quiet/-q`, `--verbose/-v`, `--no-color`, `--debug`, `--workers`.
+`--quiet/-q`, `--verbose/-v`, `--version/-V`, `--no-color`, `--debug`, `--workers`.
 
 Flags follow POSIX conventions: every option has a long `--name`, common ones a
 short form; short booleans bundle (`ls -lah`); `--flag=value` works everywhere.
@@ -60,6 +60,12 @@ Unknown flags and mutually exclusive combinations exit with code 2.
 - `sessions --status complete|failed|pending|running|cancelled` filters by scan status
 - `session delete` - `--yes/-y`
 - shell `use <name|number>` to switch the active session
+
+## Meta
+
+- `version` - print version, commit, build date, Go version, and platform.
+  `--version/-V` prints the same on one line; `version --json` emits structured
+  build metadata. Works without a database, so it is safe in CI and scripts.
 
 ## Examples
 

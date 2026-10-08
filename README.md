@@ -29,6 +29,16 @@ make build
 ./bin/dirhop --help
 ```
 
+Check the installed version:
+
+```sh
+dirhop --version          # dirhop v1.2.3 (abc1234, 2026-01-02T03:04:05Z)
+dirhop version --json     # machine-readable build metadata
+```
+
+Release binaries embed the version, commit, and build date. `go install` builds
+report the module version and VCS revision from the Go build info.
+
 ## Quick start
 
 Open a listing for the first time, crawl it, and enter the interactive shell:
@@ -143,12 +153,13 @@ example-com:/releases > exit
 - Transfer: `download`
 - Index: `refresh`, `errors`, `changes`, `info`, `stats`
 - Sessions: `sessions`, `session list|use|info|rename|delete|refresh`, shell `use`
+- Meta: `version` (also `--version/-V`; `version --json` for build metadata)
 
 Important commands support `--json`, `--quiet`, and `--no-color`. Use `--session/-s` to select a session for one command without changing the active session.
 
 Flags follow POSIX conventions: every option has a long `--name` form, and common ones also have a single-letter short form. Short and long forms are interchangeable, short booleans can be bundled (`ls -lah`), and `--flag=value` works everywhere. Unknown flags and mutually exclusive combinations exit with code 2.
 
-Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--quiet/-q`, `--verbose/-v`, `--no-color`, `--debug`, `--workers`.
+Global: `--session/-s`, `--config/-c`, `--url/-u`, `--name/-n`, `--json/-j`, `--quiet/-q`, `--verbose/-v`, `--version/-V`, `--no-color`, `--debug`, `--workers`.
 
 | Command | Short forms |
 | --- | --- |

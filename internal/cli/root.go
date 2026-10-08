@@ -23,6 +23,7 @@ import (
 	"github.com/m1r3dk/dirhop/internal/model"
 	"github.com/m1r3dk/dirhop/internal/output"
 	"github.com/m1r3dk/dirhop/internal/shell"
+	"github.com/m1r3dk/dirhop/internal/version"
 )
 
 type options struct {
@@ -45,12 +46,50 @@ type options struct {
 }
 
 func Execute() error {
+	// `version` and `--version`/`-V` must never touch the database or config:
+	// they have to work even when the local index is missing or stale, and in
+	// scripts/CI. Handle them before opening the app.
+	if wantsJSON, ok := versionQuery(os.Args[1:]); ok {
+		if wantsJSON {
+			return output.JSON(os.Stdout, version.Get())
+		}
+		fmt.Fprintln(os.Stdout, version.Get().String())
+		return nil
+	}
 	root, cleanup, err := newRoot(os.Stdout, os.Stderr, configArgument(os.Args[1:]))
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 	return root.ExecuteContext(context.Background())
+}
+
+// versionQuery reports whether the command line is a version query and whether
+// JSON output was requested. It recognizes `dirhop version [--json]`,
+// `dirhop --version`, and `dirhop -V`. Anything with another positional command
+// or `--help` is not a version query and returns ok=false.
+func versionQuery(args []string) (jsonOut bool, ok bool) {
+	if len(args) == 0 {
+		return false, false
+	}
+	switch args[0] {
+	case "--version", "-V":
+		return false, true
+	case "version":
+		for _, a := range args[1:] {
+			switch a {
+			case "--json", "-j":
+				jsonOut = true
+			default:
+				// Unknown flag/arg: defer to the normal command tree so it can
+				// produce a proper error message.
+				return false, false
+			}
+		}
+		return jsonOut, true
+	default:
+		return false, false
+	}
 }
 
 func newRoot(stdout, stderr io.Writer, configPath string) (*cobra.Command, func(), error) {
@@ -105,6 +144,7 @@ run "download".`,
   dirhop -s mirror download /pub/x.iso   download one file`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       version.Get().String(),
 		Args:          cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -134,6 +174,10 @@ run "download".`,
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
+	// `--version`/`-V` prints one clean line. A dedicated `version` subcommand
+	// adds machine-readable output via `--json`.
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.Flags().BoolP("version", "V", false, "print version information and exit")
 	// Bad flag spellings are user error, not an internal failure: exit 2.
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
@@ -174,7 +218,30 @@ run "download".`,
 		}
 		return runShell(cmd.Context(), site)
 	}})
+	root.AddCommand(newVersion(opt, stdout))
 	return root
+}
+
+// newVersion prints build metadata. The plain form is one human-readable line;
+// `--json` emits a stable object for scripts and bug reports.
+func newVersion(opt *options, out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version, commit, build date, and runtime information",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			info := version.Get()
+			if opt.json {
+				return output.JSON(out, info)
+			}
+			fmt.Fprintf(out, "dirhop %s\n", info.Version)
+			fmt.Fprintf(out, "  commit:  %s\n", info.Commit)
+			fmt.Fprintf(out, "  built:   %s\n", info.Date)
+			fmt.Fprintf(out, "  go:      %s\n", info.GoVersion)
+			fmt.Fprintf(out, "  platform: %s\n", info.Platform)
+			return nil
+		},
+	}
 }
 
 // shellExec runs one shell line through a fresh command tree pinned to the

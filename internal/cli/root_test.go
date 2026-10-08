@@ -299,6 +299,33 @@ func TestShortAndLongFlagsAreEquivalent(t *testing.T) {
 	}
 }
 
+// Version queries must be recognized before the app (and its database) open, so
+// `dirhop version`/`--version` work even when the local index is missing or
+// stale. `version --json` sets the JSON flag; other commands are not matched.
+func TestVersionQueryRouting(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		wantJSON bool
+		wantOK   bool
+	}{
+		{[]string{"version"}, false, true},
+		{[]string{"--version"}, false, true},
+		{[]string{"-V"}, false, true},
+		{[]string{"version", "--json"}, true, true},
+		{[]string{"version", "-j"}, true, true},
+		{[]string{"ls"}, false, false},
+		{[]string{"-s", "x", "version"}, false, false},
+		{[]string{"version", "--bogus"}, false, false},
+		{nil, false, false},
+	} {
+		gotJSON, gotOK := versionQuery(tc.args)
+		if gotJSON != tc.wantJSON || gotOK != tc.wantOK {
+			t.Errorf("versionQuery(%v) = (json=%v, ok=%v), want (json=%v, ok=%v)",
+				tc.args, gotJSON, gotOK, tc.wantJSON, tc.wantOK)
+		}
+	}
+}
+
 func TestConfigArgumentAcceptsPOSIXSpellings(t *testing.T) {
 	for _, tc := range []struct {
 		args []string

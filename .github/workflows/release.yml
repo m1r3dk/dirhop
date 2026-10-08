@@ -21,6 +21,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          PKG="github.com/m1r3dk/dirhop/internal/version"
+          LDFLAGS="-s -w -X ${PKG}.version=${VERSION} -X ${PKG}.commit=${COMMIT} -X ${PKG}.date=${DATE}"
           mkdir -p dist
           platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
           for p in $platforms; do
@@ -29,7 +33,7 @@ jobs:
             [ "$os" = "windows" ] && out="dirhop.exe"
             echo "building $os/$arch"
             env GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/dirhop
+              go build -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/dirhop
             if [ "$os" = "windows" ]; then
               zip -q "dist/dirhop_${VERSION}_${os}_${arch}.zip" "$out"
             else
