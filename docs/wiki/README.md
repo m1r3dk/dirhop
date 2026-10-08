@@ -1,19 +1,16 @@
 # Wiki content
 
-These pages mirror the project wiki. GitHub wikis are only available on public
-repositories (or private repositories on paid plans), so while this repository
-is **private** the pages live here under version control.
+These Markdown pages are the source of truth for the project wiki, kept under
+version control here. The repository is public and the GitHub wiki is enabled.
 
 ## Publishing to the GitHub wiki
 
-Once the repository is public (or wikis are enabled), publish these to the wiki
-with:
+The wiki is a separate git repo (`dirhop.wiki.git`). GitHub only creates it
+after the first page is saved once in the browser: open the
+[Wiki tab](https://github.com/m1r3dk/dirhop/wiki) and save any page. After that,
+sync these files with:
 
 ```sh
-# enable the wiki first (Settings > Features > Wikis, or:)
-gh api -X PATCH repos/m1r3dk/dirhop -f has_wiki=true
-
-# create the first page in the browser once, then:
 git clone git@github.com:m1r3dk/dirhop.wiki.git
 cp docs/wiki/*.md dirhop.wiki/
 cd dirhop.wiki && git add -A && git commit -m "wiki: sync from docs/wiki" && git push
