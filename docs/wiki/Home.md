@@ -12,10 +12,13 @@ listings) only; file content is transferred only after an explicit `download`.
 
 - [[Installation]] - install options and building from source
 - [[Quick Start|Quick-Start]] - index your first site or bucket
-- [[Commands]] - full command and flag reference
+- [[Command Reference|Command-Reference]] - every command, flag, and synopsis
+- [[Recipes]] - task-oriented workflows
+- [[Flags & Exit Codes|Flags-and-Exit-Codes]] - global flags, exit codes, JSON scripting
 - [[Buckets]] - S3, GCS, Azure Blob, Spaces, custom domains
 - [[GrayHatWarfare|GrayHatWarfare]] - discovering public buckets with `ghw`
 - [[Configuration]] - config file, storage locations, env vars
+- [[Troubleshooting]] - diagnose by exit code and symptom
 - [[Architecture]] - how dirhop is built
 - [[Security & Responsible Use|Security]] - scope, ethics, reporting
 - [[FAQ]]

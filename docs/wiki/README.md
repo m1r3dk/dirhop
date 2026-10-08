@@ -27,10 +27,14 @@ chrome. Internal `[[Page]]` links resolve against wiki page names.
 - `Home.md`
 - `Installation.md`
 - `Quick-Start.md`
-- `Commands.md`
+- `Command-Reference.md`
+- `Recipes.md`
+- `Flags-and-Exit-Codes.md`
+- `Commands.md` (redirect to `Command-Reference.md`)
 - `Buckets.md`
 - `GrayHatWarfare.md`
 - `Configuration.md`
+- `Troubleshooting.md`
 - `Architecture.md`
 - `Security.md`
 - `FAQ.md`

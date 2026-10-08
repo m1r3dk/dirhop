@@ -259,7 +259,7 @@ make vet
 make build
 ```
 
-Architecture and security decisions are documented in [`docs/architecture.md`](docs/architecture.md). Extended guides (install, commands, buckets, configuration, FAQ) live in [`docs/wiki/`](docs/wiki/) and mirror the GitHub wiki.
+Architecture and security decisions are documented in [`docs/architecture.md`](docs/architecture.md). Extended guides live in [`docs/wiki/`](docs/wiki/) and mirror the GitHub wiki: the [Command Reference](docs/wiki/Command-Reference.md), [Recipes](docs/wiki/Recipes.md), [Flags & Exit Codes](docs/wiki/Flags-and-Exit-Codes.md), [Buckets](docs/wiki/Buckets.md), [Configuration](docs/wiki/Configuration.md), and [Troubleshooting](docs/wiki/Troubleshooting.md).
 
 Contributions are welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 

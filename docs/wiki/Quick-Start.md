@@ -94,3 +94,10 @@ mirror:/releases > exit
 
 History persists across sessions; Tab completes commands, remote paths, and
 session names.
+
+## Next steps
+
+- [[Command Reference|Command-Reference]] - every command and flag.
+- [[Recipes]] - task-oriented workflows (bulk indexing, cross-session search, scripting).
+- [[Flags & Exit Codes|Flags-and-Exit-Codes]] - global flags, exit codes, `--json`.
+- [[Troubleshooting]] - diagnose by exit code and symptom.
