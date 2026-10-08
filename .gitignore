@@ -6,3 +6,6 @@ coverage.out
 *.db-wal
 *.part
 .DS_Store
+
+# Local-only bucket lists (large, real URLs; not for public distribution)
+/testdata/buckets/
