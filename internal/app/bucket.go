@@ -146,7 +146,7 @@ func (a *App) crawlBucket(ctx context.Context, site *model.Site, target bucket.T
 	}
 	seen := run.StartedAt
 
-	// ponytail: directory-ID map grows with directory count, not object count.
+	// The directory-ID map grows with directory count, not object count.
 	dirs := map[string]int64{"/": root.ID}
 	root.LastSeenAt = seen
 	if _, err := a.DB.UpsertEntriesNoRecount(ctx, []model.Entry{*root}); err != nil {
