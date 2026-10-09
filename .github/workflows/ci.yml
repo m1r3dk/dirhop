@@ -35,4 +35,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: govulncheck
+        env:
+          # govulncheck@latest moved to a release that requires a newer Go than
+          # go.mod pins, and setup-go sets GOTOOLCHAIN=local, so `go run` refuses
+          # to build it. Allow Go to fetch the toolchain govulncheck needs.
+          GOTOOLCHAIN: auto
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

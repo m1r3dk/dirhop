@@ -256,7 +256,17 @@ func sqliteDSN(path string, busy time.Duration) string {
 		return fmt.Sprintf("file:dirhop-memory-%d?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)", memorySequence.Add(1), ms)
 	}
 	abs, _ := filepath.Abs(path)
-	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	// url.URL renders a file URL whose authority is empty, so the path must be
+	// rooted with a leading slash. On Unix filepath.Abs already starts with "/";
+	// on Windows it is like "C:\foo", which ToSlash turns into "C:/foo" with no
+	// leading slash, making url.String() emit "file://C:/foo" and the SQLite URI
+	// parser read "C:" as an authority ("invalid uri authority: C:"). Prefix a
+	// slash so Windows yields "file:///C:/foo".
+	slashed := filepath.ToSlash(abs)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	u := &url.URL{Scheme: "file", Path: slashed}
 	q := u.Query()
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "journal_mode(WAL)")
